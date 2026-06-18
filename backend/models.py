@@ -13,11 +13,6 @@ class PieceInfo(BaseModel):
     color: str
 
 
-class BoardState(BaseModel):
-    board: list[list[Optional[PieceInfo]]]
-    turn: str  # "r" or "b"
-
-
 class ValidMovesRequest(BaseModel):
     row: int
     col: int
@@ -30,13 +25,14 @@ class MoveRequest(BaseModel):
     to_pos: Position
     board: list[list[Optional[PieceInfo]]]
     turn: str
+    game_id: Optional[int] = None
 
 
 class MoveResponse(BaseModel):
     valid: bool
     captured: Optional[PieceInfo] = None
     check: bool = False
-    game_over: Optional[str] = None  # "red_win" / "black_win" / None
+    game_over: Optional[str] = None
     new_board: Optional[list[list[Optional[PieceInfo]]]] = None
 
 

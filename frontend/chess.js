@@ -22,6 +22,8 @@ let gameSessionId = null;
 let useBackend = true;        // 是否使用后端 API
 let capturedRed = [];         // 被吃的红方棋子
 let capturedBlack = [];       // 被吃的黑方棋子
+let syncedStepCount = 0;      // 已同步的步数，用于轮询检测外部变更
+let pollingTimer = null;      // 轮询定时器
 
 // DOM
 const canvas  = document.getElementById("chess-board");
@@ -81,18 +83,80 @@ function initGame() {
   updateTurn();
   renderCaptured();
 
-  // 创建后端对局
   const modeEl = document.getElementById("mode-indicator");
-  if (useBackend) {
+  if (!useBackend) {
+    initBoard();
+    drawBoard();
+    renderPieces();
+    modeEl.textContent = "模式：本地规则";
+    modeEl.style.color = "#ff9800";
+    return;
+  }
+
+  // 尝试恢复上次对局
+  const savedId = localStorage.getItem("chess_game_id");
+  if (savedId) {
+    fetch("/api/game/" + savedId)
+      .then(r => r.ok ? r.json() : Promise.reject(r.status))
+      .then(data => {
+        if (data.status !== "ongoing") {
+          // 对局已结束，创建新局
+          localStorage.removeItem("chess_game_id");
+          createNewGame();
+          return;
+        }
+        // 恢复对局
+        gameSessionId = data.game_id;
+        board = data.board;
+        turn = data.turn;
+        // 恢复历史
+        fetch("/api/game/" + gameSessionId + "/history")
+          .then(r => r.json())
+          .then(h => {
+            history = h.moves.map(m => ({
+              from: { row: m.from_row, col: m.from_col },
+              to: { row: m.to_row, col: m.to_col },
+              piece: { type: m.piece_type, color: m.piece_color },
+              captured: m.captured_type ? { type: m.captured_type, color: m.captured_color } : null,
+            }));
+            // 恢复被吃棋子
+            history.forEach(step => {
+              if (step.captured) {
+                if (step.captured.color === "r") capturedRed.push(step.captured);
+                else capturedBlack.push(step.captured);
+              }
+            });
+            syncedStepCount = history.length;
+            startPolling();
+            renderCaptured();
+          });
+        drawBoard();
+        renderPieces();
+        updateTurn();
+        modeEl.textContent = "模式：后端API（已恢复对局 #" + gameSessionId + "）";
+        modeEl.style.color = "#4caf50";
+      })
+      .catch(() => {
+        // 对局不存在或加载失败，创建新局
+        localStorage.removeItem("chess_game_id");
+        createNewGame();
+      });
+  } else {
+    createNewGame();
+  }
+
+  function createNewGame() {
     fetch("/api/game/new", { method: "POST" })
       .then(r => r.json())
       .then(data => {
         gameSessionId = data.game_id;
-        // 用后端返回的棋盘（确保一致性）
+        localStorage.setItem("chess_game_id", gameSessionId);
         board = data.board;
         drawBoard();
         renderPieces();
-        modeEl.textContent = "模式：后端API";
+        syncedStepCount = 0;
+        startPolling();
+        modeEl.textContent = "模式：后端API（对局 #" + gameSessionId + "）";
         modeEl.style.color = "#4caf50";
       })
       .catch(() => {
@@ -103,12 +167,6 @@ function initGame() {
         modeEl.textContent = "模式：本地规则（后端未连接）";
         modeEl.style.color = "#ff9800";
       });
-  } else {
-    initBoard();
-    drawBoard();
-    renderPieces();
-    modeEl.textContent = "模式：本地规则";
-    modeEl.style.color = "#ff9800";
   }
 }
 
@@ -327,6 +385,7 @@ async function doMove(fromR, fromC, toR, toC) {
           from_pos: { row: fromR, col: fromC },
           to_pos: { row: toR, col: toC },
           turn,
+          game_id: gameSessionId,
         }),
       });
       const data = await resp.json();
@@ -356,6 +415,7 @@ async function doMove(fromR, fromC, toR, toC) {
       turn = turn === "r" ? "b" : "r";
       selected = null;
       validMoves = [];
+      syncedStepCount = history.length;
       updateTurn();
       drawBoard();
       renderPieces();
@@ -418,12 +478,58 @@ document.getElementById("btn-undo").addEventListener("click", () => {
 
 // 重新开始
 document.getElementById("btn-restart").addEventListener("click", () => {
+  if (pollingTimer) clearInterval(pollingTimer);
+  localStorage.removeItem("chess_game_id");
   initGame();
 });
 
 // ============================================================
-//  辅助
+//  轮询：检测外部走棋（如 test_api.py 直接调 API）
 // ============================================================
+function startPolling() {
+  if (pollingTimer) clearInterval(pollingTimer);
+  pollingTimer = setInterval(async () => {
+    if (!useBackend || !gameSessionId || gameOver) return;
+    try {
+      const resp = await fetch(`/api/game/${gameSessionId}/history`);
+      const data = await resp.json();
+      const remoteSteps = (data.moves || []).length;
+      if (remoteSteps !== syncedStepCount) {
+        // 外部走棋了，重新加载棋盘
+        const gameResp = await fetch(`/api/game/${gameSessionId}`);
+        const gameData = await gameResp.json();
+        board = gameData.board;
+        turn = gameData.turn;
+        syncedStepCount = remoteSteps;
+        // 同步 history、captured
+        history = data.moves.map(m => ({
+          from: { row: m.from_row, col: m.from_col },
+          to: { row: m.to_row, col: m.to_col },
+          piece: { type: m.piece_type, color: m.piece_color },
+          captured: m.captured_type ? { type: m.captured_type, color: m.captured_color } : null,
+        }));
+        capturedRed = [];
+        capturedBlack = [];
+        history.forEach(step => {
+          if (step.captured) {
+            if (step.captured.color === "r") capturedRed.push(step.captured);
+            else capturedBlack.push(step.captured);
+          }
+        });
+        selected = null;
+        validMoves = [];
+        updateTurn();
+        drawBoard();
+        renderPieces();
+        renderCaptured();
+        if (gameData.status !== "ongoing") {
+          gameOver = true;
+          msgEl.textContent = gameData.status === "red_win" ? "红方胜！" : "黑方胜！";
+        }
+      }
+    } catch (e) { /* 忽略轮询错误 */ }
+  }, 500);
+}
 function updateTurn() {
   turnEl.textContent = turn === "r" ? "红方" : "黑方";
   turnEl.style.color = turn === "r" ? "#c62828" : "#1a1a1a";

@@ -1,5 +1,9 @@
 """中国象棋后端 API - FastAPI 入口"""
 import os
+import sys
+# 确保能导入同目录模块
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -13,7 +17,7 @@ from chess_rules import (
     create_initial_board, get_valid_moves, is_valid_move,
     make_move, check_game_result, is_in_check,
 )
-from database import init_db, create_game, get_game, update_game, add_move, get_moves
+from database import init_db, create_game, get_game, update_game, add_move, get_moves, record_step, get_step_count
 
 
 @asynccontextmanager
@@ -36,21 +40,11 @@ FRONTEND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "f
 app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
 
 
-TEST_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "test")
-
-
 @app.get("/")
 def serve_index():
     """返回前端页面"""
     from fastapi.responses import FileResponse
     return FileResponse(os.path.join(FRONTEND_DIR, "index.html"))
-
-
-@app.get("/test")
-def serve_test():
-    """返回 API 测试页面"""
-    from fastapi.responses import FileResponse
-    return FileResponse(os.path.join(TEST_DIR, "test.html"))
 
 
 @app.post("/api/valid-moves")
@@ -63,11 +57,12 @@ def api_valid_moves(req: ValidMovesRequest):
 
 @app.post("/api/move", response_model=MoveResponse)
 def api_move(req: MoveRequest):
-    """执行走棋"""
+    """执行走棋。如果传入 game_id 则同步写入数据库。"""
     board = _parse_board(req.board)
     from_pos = {"row": req.from_pos.row, "col": req.from_pos.col}
     to_pos = {"row": req.to_pos.row, "col": req.to_pos.col}
 
+    piece = board[req.from_pos.row][req.from_pos.col]
     if not is_valid_move(board, from_pos, to_pos, req.turn):
         return MoveResponse(valid=False)
 
@@ -77,8 +72,25 @@ def api_move(req: MoveRequest):
     in_check = is_in_check(new_board, next_turn)
 
     game_over = None
+    game_status = "ongoing"
     if result in ("red_win", "black_win"):
         game_over = result
+        game_status = result
+
+    # 如果关联了对局，同步写入数据库
+    if req.game_id is not None:
+        step = get_step_count(req.game_id) + 1
+        record_step(
+            game_id=req.game_id,
+            step=step,
+            board=new_board,
+            turn=next_turn,
+            from_pos=from_pos,
+            to_pos=to_pos,
+            piece=piece,
+            captured=captured,
+            status=game_status,
+        )
 
     return MoveResponse(
         valid=True,
