@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>中国象棋 API 测试</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: "Microsoft YaHei", sans-serif; background: #1e1e2e; color: #cdd6f4; padding: 20px; }
+    h1 { text-align: center; margin-bottom: 20px; color: #f5c2e7; }
+    .section { background: #313244; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+    .section h2 { color: #89b4fa; margin-bottom: 10px; font-size: 16px; }
+    button {
+      padding: 8px 16px; margin: 4px; border: none; border-radius: 4px;
+      background: #89b4fa; color: #1e1e2e; cursor: pointer; font-size: 14px;
+      font-family: "Microsoft YaHei", sans-serif;
+    }
+    button:hover { background: #b4befe; }
+    button.danger { background: #f38ba8; }
+    button.success { background: #a6e3a1; }
+    pre {
+      background: #181825; color: #a6e3a1; padding: 12px; border-radius: 4px;
+      margin-top: 8px; max-height: 300px; overflow: auto; font-size: 13px;
+      white-space: pre-wrap; word-break: break-all;
+    }
+    .status { padding: 8px 12px; margin-top: 8px; border-radius: 4px; font-weight: bold; }
+    .status.ok { background: #a6e3a120; color: #a6e3a1; }
+    .status.err { background: #f38ba820; color: #f38ba8; }
+    input {
+      padding: 6px 10px; border: 1px solid #585b70; border-radius: 4px;
+      background: #181825; color: #cdd6f4; width: 60px; margin: 2px;
+    }
+    label { color: #bac2de; margin-right: 8px; }
+    .inline { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 8px 0; }
+  </style>
+</head>
+<body>
+  <h1>中国象棋 - API 测试面板</h1>
+  <div id="status-bar" class="status">等待操作...</div>
+
+  <div class="section">
+    <h2>1. 对局管理</h2>
+    <button onclick="newGame()">创建新对局</button>
+    <button onclick="getGame()">获取当前对局</button>
+    <button onclick="getHistory()">获取走棋历史</button>
+    <span id="game-id-display"></span>
+  </div>
+
+  <div class="section">
+    <h2>2. 获取可走位置</h2>
+    <div class="inline">
+      <label>行: <input id="vm-row" type="number" value="0" min="0" max="9"></label>
+      <label>列: <input id="vm-col" type="number" value="1" min="0" max="8"></label>
+      <button onclick="getValidMoves()">查询可走位置</button>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>3. 执行走棋</h2>
+    <div class="inline">
+      <label>从 行: <input id="mv-fr" type="number" value="2" min="0" max="9"></label>
+      <label>列: <input id="mv-fc" type="number" value="1" min="0" max="8"></label>
+      <label>到 行: <input id="mv-tr" type="number" value="4" min="0" max="9"></label>
+      <label>列: <input id="mv-tc" type="number" value="1" min="0" max="8"></label>
+      <button onclick="doMove()">执行走棋</button>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>4. 胜负检测</h2>
+    <button onclick="checkWin()">检测胜负</button>
+  </div>
+
+  <div class="section">
+    <h2>5. 完整对局演示（炮二平五）</h2>
+    <button class="success" onclick="demoGame()">运行演示</button>
+  </div>
+
+  <div class="section">
+    <h2>返回结果</h2>
+    <pre id="output">等待请求...</pre>
+  </div>
+
+  <script>
+    const API = "http://localhost:8001";
+    let currentGameId = null;
+    let currentBoard = null;
+    let currentTurn = "r";
+
+    const status = (msg, ok = true) => {
+      const el = document.getElementById("status-bar");
+      el.textContent = msg;
+      el.className = "status " + (ok ? "ok" : "err");
+    };
+
+    const output = (data) => {
+      document.getElementById("output").textContent = JSON.stringify(data, null, 2);
+    };
+
+    async function apiCall(path, body = null) {
+      const opts = body
+        ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }
+        : {};
+      const res = await fetch(API + path, opts);
+      return res.json();
+    }
+
+    async function newGame() {
+      try {
+        const data = await apiCall("/api/game/new");
+        currentGameId = data.game_id;
+        currentBoard = data.board;
+        currentTurn = data.turn;
+        document.getElementById("game-id-display").textContent = "对局ID: " + currentGameId;
+        status("新对局创建成功，ID: " + currentGameId);
+        output(data);
+      } catch (e) { status("请求失败: " + e.message, false); }
+    }
+
+    async function getGame() {
+      if (!currentGameId) { status("请先创建对局", false); return; }
+      try {
+        const data = await apiCall("/api/game/" + currentGameId);
+        currentBoard = data.board;
+        currentTurn = data.turn;
+        status("获取对局成功");
+        output(data);
+      } catch (e) { status("请求失败: " + e.message, false); }
+    }
+
+    async function getHistory() {
+      if (!currentGameId) { status("请先创建对局", false); return; }
+      try {
+        const data = await apiCall("/api/game/" + currentGameId + "/history");
+        status("获取历史成功");
+        output(data);
+      } catch (e) { status("请求失败: " + e.message, false); }
+    }
+
+    async function getValidMoves() {
+      if (!currentBoard) { status("请先创建对局", false); return; }
+      const row = +document.getElementById("vm-row").value;
+      const col = +document.getElementById("vm-col").value;
+      try {
+        const data = await apiCall("/api/valid-moves", { row, col, board: currentBoard, turn: currentTurn });
+        status("查询成功，可走位置数: " + data.moves.length);
+        output(data);
+      } catch (e) { status("请求失败: " + e.message, false); }
+    }
+
+    async function doMove() {
+      if (!currentBoard) { status("请先创建对局", false); return; }
+      const from_pos = {
+        row: +document.getElementById("mv-fr").value,
+        col: +document.getElementById("mv-fc").value
+      };
+      const to_pos = {
+        row: +document.getElementById("mv-tr").value,
+        col: +document.getElementById("mv-tc").value
+      };
+      try {
+        const data = await apiCall("/api/move", {
+          from_pos, to_pos, board: currentBoard, turn: currentTurn
+        });
+        if (data.valid) {
+          currentBoard = data.new_board;
+          currentTurn = currentTurn === "r" ? "b" : "r";
+          status("走棋成功！将军: " + data.check + " | 结束: " + (data.game_over || "未结束"));
+        } else {
+          status("走法不合法！", false);
+        }
+        output(data);
+      } catch (e) { status("请求失败: " + e.message, false); }
+    }
+
+    async function checkWin() {
+      if (!currentBoard) { status("请先创建对局", false); return; }
+      try {
+        const data = await apiCall("/api/check-win", {
+          row: 0, col: 0, board: currentBoard, turn: currentTurn
+        });
+        status("检测结果: " + data.result);
+        output(data);
+      } catch (e) { status("请求失败: " + e.message, false); }
+    }
+
+    async function demoGame() {
+      status("运行演示...");
+      const log = [];
+      try {
+        // 1. 创建新对局
+        let data = await apiCall("/api/game/new");
+        currentGameId = data.game_id;
+        currentBoard = data.board;
+        currentTurn = "r";
+        log.push({ step: "创建对局", game_id: currentGameId });
+
+        // 2. 红方炮二平五 (1,7) -> (4,7)
+        data = await apiCall("/api/move", {
+          from_pos: { row: 7, col: 1 }, to_pos: { row: 7, col: 4 },
+          board: currentBoard, turn: currentTurn
+        });
+        currentBoard = data.new_board; currentTurn = "b";
+        log.push({ step: "红方: 炮二平五", valid: data.valid, check: data.check });
+
+        // 3. 黑方馬8进7 (7,0) -> (6,2)
+        data = await apiCall("/api/move", {
+          from_pos: { row: 0, col: 7 }, to_pos: { row: 2, col: 6 },
+          board: currentBoard, turn: currentTurn
+        });
+        currentBoard = data.new_board; currentTurn = "r";
+        log.push({ step: "黑方: 馬8进7", valid: data.valid, check: data.check });
+
+        // 4. 红方馬二进三 (7,1) -> (5,2)
+        data = await apiCall("/api/move", {
+          from_pos: { row: 9, col: 1 }, to_pos: { row: 7, col: 2 },
+          board: currentBoard, turn: currentTurn
+        });
+        currentBoard = data.new_board; currentTurn = "b";
+        log.push({ step: "红方: 馬二进三", valid: data.valid, check: data.check });
+
+        log.push({ step: "演示完成", game_over: data.game_over || "未结束" });
+        status("演示完成！");
+        output(log);
+      } catch (e) { status("演示失败: " + e.message, false); output(log); }
+    }
+  </script>
+</body>
+</html>
