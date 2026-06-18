@@ -297,7 +297,7 @@ async function fetchValidMoves(row, col) {
       const resp = await fetch("/api/valid-moves", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ board, row, col, game_id: gameSessionId }),
+        body: JSON.stringify({ board, row, col, turn }),
       });
       const data = await resp.json();
       validMoves = data.moves || [];
@@ -324,17 +324,14 @@ async function doMove(fromR, fromC, toR, toC) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           board,
-          from_row: fromR,
-          from_col: fromC,
-          to_row: toR,
-          to_col: toC,
-          current_turn: turn,
-          game_id: gameSessionId,
+          from_pos: { row: fromR, col: fromC },
+          to_pos: { row: toR, col: toC },
+          turn,
         }),
       });
       const data = await resp.json();
       if (!data.valid) {
-        msgEl.textContent = data.message || "走法不合法";
+        msgEl.textContent = "走法不合法";
         return;
       }
       // 保存历史
@@ -351,9 +348,12 @@ async function doMove(fromR, fromC, toR, toC) {
         msgEl.textContent = `吃子：${captured.type}`;
         renderCaptured();
       }
+      if (data.check) {
+        msgEl.textContent = (msgEl.textContent || "") + " 将军！";
+      }
       // 用后端返回的新棋盘
       board = data.new_board;
-      turn = data.next_turn;
+      turn = turn === "r" ? "b" : "r";
       selected = null;
       validMoves = [];
       updateTurn();
@@ -361,7 +361,7 @@ async function doMove(fromR, fromC, toR, toC) {
       renderPieces();
       if (data.game_over) {
         gameOver = true;
-        msgEl.textContent = data.winner === "r" ? "红方胜！" : "黑方胜！";
+        msgEl.textContent = data.game_over === "red_win" ? "红方胜！" : "黑方胜！";
       }
       return;
     } catch (err) {
