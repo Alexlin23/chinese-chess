@@ -92,18 +92,28 @@ def get_valid_moves(board: list, r: int, c: int, turn: str) -> list[dict]:
 
 
 def is_valid_move(board: list, from_pos: dict, to_pos: dict, turn: str) -> bool:
-    """校验走法是否合法"""
+    """校验走法是否合法（定点校验，不枚举全部走法）"""
     fr, fc = from_pos["row"], from_pos["col"]
     tr, tc = to_pos["row"], to_pos["col"]
-    # 检查起点和终点坐标是否在棋盘范围内
     if not in_bounds(fr, fc) or not in_bounds(tr, tc):
         return False
     piece = board[fr][fc]
     if not piece or piece["color"] != turn:
         return False
-    moves = get_valid_moves(board, fr, fc, turn)
-    # 检查目标位置是否在合法走法列表中
-    return any(m["row"] == tr and m["col"] == tc for m in moves)
+
+    # ① 原始走法规则检查（蹩马脚、塞象眼等）
+    raw = get_raw_moves(board, fr, fc)
+    if not any(m["row"] == tr and m["col"] == tc for m in raw):
+        return False
+
+    # ② 走后己方帅是否安全（原地模拟 + 撤销）
+    captured = board[tr][tc]
+    board[tr][tc] = piece
+    board[fr][fc] = None
+    safe = not _is_in_check(board, turn)
+    board[fr][fc] = piece
+    board[tr][tc] = captured
+    return safe
 
 
 def make_move(board: list, from_pos: dict, to_pos: dict) -> tuple[list, Optional[dict]]:
@@ -271,10 +281,8 @@ def _moves_pawn(board, r, c, color):
 # ============================================================
 
 def _copy_board(board):
-    return [
-        [dict(cell) if cell else None for cell in row]
-        for row in board
-    ]
+    """浅拷贝棋盘（只复制行引用，不改动棋子dict内容）"""
+    return [row[:] for row in board]
 
 
 def _find_king(board, color):

@@ -42,6 +42,11 @@ class GameCreateResponse(BaseModel):
     turn: str
 
 
+class CheckWinRequest(BaseModel):
+    board: list[list[Optional[PieceInfo]]]
+    turn: str
+
+
 class GameInfoResponse(BaseModel):
     game_id: int
     board: list[list[Optional[PieceInfo]]]

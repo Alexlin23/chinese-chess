@@ -12,6 +12,7 @@ from contextlib import asynccontextmanager
 from models import (
     ValidMovesRequest, MoveRequest, MoveResponse,
     GameCreateResponse, GameInfoResponse, PieceInfo, Position,
+    CheckWinRequest,
 )
 from chess_rules import (
     create_initial_board, get_valid_moves, is_valid_move,
@@ -102,7 +103,7 @@ def api_move(req: MoveRequest):
 
 
 @app.post("/api/check-win")
-def api_check_win(req: ValidMovesRequest):
+def api_check_win(req: CheckWinRequest):
     """检测胜负"""
     board = _parse_board(req.board)
     result = check_game_result(board, req.turn)
