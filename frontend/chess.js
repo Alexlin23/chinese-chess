@@ -467,6 +467,10 @@ async function doMove(fromR, fromC, toR, toC) {
   board[toR][toC] = board[fromR][fromC];
   board[fromR][fromC] = null;
   turn = turn === "r" ? "b" : "r";
+  // 本地将军检测
+  if (isInCheckLocal(board, turn)) {
+    msgEl.textContent = msgEl.textContent ? msgEl.textContent + " 将军！" : "将军！";
+  }
   selected = null;
   validMoves = [];
   updateTurn();
@@ -606,32 +610,83 @@ function inBounds(r, c) {
   return r >= 0 && r < ROWS && c >= 0 && c < COLS;
 }
 
-function sameColor(p1, p2) {
-  return p1 && p2 && p1.color === p2.color;
+function _getRawMovesLocal(row, col) {
+  /**获取棋子原始走法（含吃子标记，不含将军校验）*/
+  const piece = board[row][col];
+  if (!piece) return [];
+  const t = piece.type, c = piece.color;
+  switch (t) {
+    case "車": return movesRook(row, col, c);
+    case "馬": return movesKnight(row, col, c);
+    case "相": case "象": return movesElephant(row, col, c);
+    case "仕": case "士": return movesAdvisor(row, col, c);
+    case "帥": case "將": return movesKing(row, col, c);
+    case "炮": case "砲": return movesCannon(row, col, c);
+    case "兵": case "卒": return movesPawn(row, col, c);
+  }
+  return [];
+}
+
+function isInCheckLocal(board, color) {
+  /**检查 color 方是否被将军*/
+  const myKingType = color === "r" ? "帥" : "將";
+  const enemyKingType = color === "r" ? "將" : "帥";
+  const enemyColor = color === "r" ? "b" : "r";
+
+  let myKing = null, enemyKing = null;
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      const p = board[r][c];
+      if (!p) continue;
+      if (p.type === myKingType && p.color === color) myKing = {row: r, col: c};
+      else if (p.type === enemyKingType && p.color === enemyColor) enemyKing = {row: r, col: c};
+    }
+  }
+  if (!myKing) return true;  // 帅已被吃
+
+  // 检查所有敌方棋子是否能攻击到帅
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      const p = board[r][c];
+      if (!p || p.color !== enemyColor) continue;
+      const moves = _getRawMovesLocal(r, c);
+      for (const m of moves) {
+        if (m.row === myKing.row && m.col === myKing.col) return true;
+      }
+    }
+  }
+
+  // 将帅对面检测
+  if (enemyKing && enemyKing.col === myKing.col) {
+    const minR = Math.min(myKing.row, enemyKing.row);
+    const maxR = Math.max(myKing.row, enemyKing.row);
+    for (let r = minR + 1; r < maxR; r++) {
+      if (board[r][myKing.col]) return false;
+    }
+    return true;
+  }
+  return false;
 }
 
 function getValidMovesLocal(row, col) {
+  /**获取合法走法（含将军校验，原地模拟+撤销）*/
   const piece = board[row][col];
   if (!piece) return [];
-  const t = piece.type;
-  const c = piece.color;
-  let moves = [];
 
-  switch (t) {
-    case "車": moves = movesRook(row, col, c); break;
-    case "馬": moves = movesKnight(row, col, c); break;
-    case "相":
-    case "象": moves = movesElephant(row, col, c); break;
-    case "仕":
-    case "士": moves = movesAdvisor(row, col, c); break;
-    case "帥":
-    case "將": moves = movesKing(row, col, c); break;
-    case "炮":
-    case "砲": moves = movesCannon(row, col, c); break;
-    case "兵":
-    case "卒": moves = movesPawn(row, col, c); break;
+  const raw = _getRawMovesLocal(row, col);
+  const valid = [];
+  for (const m of raw) {
+    const captured = board[m.row][m.col];
+    board[m.row][m.col] = piece;
+    board[row][col] = null;
+    if (!isInCheckLocal(board, piece.color)) {
+      valid.push(m);
+    }
+    // 撤销
+    board[row][col] = piece;
+    board[m.row][m.col] = captured;
   }
-  return moves;
+  return valid;
 }
 
 function movesRook(r, c, color) {
