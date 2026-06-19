@@ -17,7 +17,7 @@ from chess_rules import (
     create_initial_board, get_valid_moves, is_valid_move,
     make_move, check_game_result, is_in_check,
 )
-from database import init_db, create_game, get_game, update_game, add_move, get_moves, record_step, get_step_count
+from database import init_db, create_game, get_game, update_game, add_move, get_moves, record_step, get_step_count, undo_game
 
 
 @asynccontextmanager
@@ -132,6 +132,7 @@ def api_get_game(game_id: int):
         board=game["board"],
         turn=game["turn"],
         status=game["status"],
+        step_count=get_step_count(game_id),
     )
 
 
@@ -143,6 +144,15 @@ def api_game_history(game_id: int):
         raise HTTPException(status_code=404, detail="对局不存在")
     moves = get_moves(game_id)
     return {"game_id": game_id, "moves": moves}
+
+
+@app.post("/api/game/{game_id}/undo")
+def api_undo(game_id: int):
+    """悔棋：删除最后一步，回滚棋盘"""
+    result = undo_game(game_id, create_initial_board)
+    if not result:
+        raise HTTPException(status_code=400, detail="无法悔棋（对局不存在或无走棋记录）")
+    return result
 
 
 # ============================================================

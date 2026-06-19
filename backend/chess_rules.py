@@ -72,19 +72,22 @@ def get_raw_moves(board: list, r: int, c: int) -> list[dict]:
 def get_valid_moves(board: list, r: int, c: int, turn: str) -> list[dict]:
     """获取合法走法（含将军校验）"""
     piece = board[r][c]
-    # turn: 当前轮到哪方走棋，"r"表示红方，"b"表示黑方
     if not piece or piece["color"] != turn:
         return []
 
     raw = get_raw_moves(board, r, c)
     valid = []
     for m in raw:
-        # 模拟走棋，检查走后己方是否被将
-        new_board = _simulate_move(board, r, c, m["row"], m["col"])  # 返回模拟走棋后的新棋盘状态（深拷贝）
-        # _is_in_check 返回布尔值：True 表示被将军，False 表示未被将军
-        # 这里筛选出走棋后己方不被将军的合法走法
-        if not _is_in_check(new_board, turn):
+        to_r, to_c = m["row"], m["col"]
+        # 原地模拟走棋（省深拷贝），检查走后己方是否被将
+        captured = board[to_r][to_c]
+        board[to_r][to_c] = piece
+        board[r][c] = None
+        if not _is_in_check(board, turn):
             valid.append(m)
+        # 撤销模拟
+        board[r][c] = piece
+        board[to_r][to_c] = captured
     return valid
 
 
@@ -274,13 +277,6 @@ def _copy_board(board):
     ]
 
 
-def _simulate_move(board, fr, fc, tr, tc):
-    new_board = _copy_board(board)
-    new_board[tr][tc] = new_board[fr][fc]
-    new_board[fr][fc] = None
-    return new_board
-
-
 def _find_king(board, color):
     king_type = "帥" if color == "r" else "將"
     for r in range(ROWS):
@@ -293,12 +289,27 @@ def _find_king(board, color):
 
 def _is_in_check(board, color):
     """检查 color 方是否被将军"""
-    king_pos = _find_king(board, color)
-    if not king_pos:
+    # 一次扫描同时定位双方将/帅，省去两次 _find_king
+    my_king_type = "帥" if color == "r" else "將"
+    enemy_king_type = "將" if color == "r" else "帥"
+    enemy_color = "b" if color == "r" else "r"
+
+    my_king = None
+    enemy_king = None
+    for r in range(ROWS):
+        for c in range(COLS):
+            p = board[r][c]
+            if p:
+                t = p["type"]
+                if t == my_king_type and p["color"] == color:
+                    my_king = (r, c)
+                elif t == enemy_king_type and p["color"] == enemy_color:
+                    enemy_king = (r, c)
+
+    if not my_king:
         return True  # 将/帅已被吃，视为被将
 
-    enemy_color = "b" if color == "r" else "r"
-    kr, kc = king_pos
+    kr, kc = my_king
 
     # 检查所有敌方棋子是否能攻击到将/帅位置
     for r in range(ROWS):
@@ -310,19 +321,14 @@ def _is_in_check(board, color):
                     if m["row"] == kr and m["col"] == kc:
                         return True
 
-    # 将帅对面检测
-    enemy_king_type = "將" if color == "r" else "帥"
-    ek_pos = _find_king(board, enemy_color)
-    if ek_pos and ek_pos[1] == kc:
-        min_r = min(kr, ek_pos[0])
-        max_r = max(kr, ek_pos[0])
-        blocked = False
+    # 将帅对面检测（复用已定位的 enemy_king）
+    if enemy_king and enemy_king[1] == kc:
+        min_r = min(kr, enemy_king[0])
+        max_r = max(kr, enemy_king[0])
         for check_r in range(min_r + 1, max_r):
             if board[check_r][kc]:
-                blocked = True
-                break
-        if not blocked:
-            return True
+                return False
+        return True
 
     return False
 

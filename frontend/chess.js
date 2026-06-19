@@ -24,6 +24,8 @@ let capturedRed = [];         // 被吃的红方棋子
 let capturedBlack = [];       // 被吃的黑方棋子
 let syncedStepCount = 0;      // 已同步的步数，用于轮询检测外部变更
 let pollingTimer = null;      // 轮询定时器
+let pieceEls = Array.from({length: ROWS}, () => new Array(COLS).fill(null));  // 棋子DOM缓存
+let moveIndicatorEls = [];    // 可走位置指示器DOM缓存
 
 // DOM
 const canvas  = document.getElementById("chess-board");
@@ -79,6 +81,12 @@ function initGame() {
   gameOver = false;
   capturedRed = [];
   capturedBlack = [];
+  // 清除旧棋子DOM缓存
+  for (let r = 0; r < ROWS; r++)
+    for (let c = 0; c < COLS; c++)
+      if (pieceEls[r][c]) { pieceEls[r][c].remove(); pieceEls[r][c] = null; }
+  moveIndicatorEls.forEach(el => el.remove());
+  moveIndicatorEls = [];
   msgEl.textContent = "";
   updateTurn();
   renderCaptured();
@@ -240,52 +248,62 @@ function drawBoard() {
 }
 
 // ============================================================
-//  渲染棋子
+//  渲染棋子（增量更新，不复建DOM）
 // ============================================================
 function renderPieces() {
-  piecesC.innerHTML = "";
   const captureTargets = new Set(validMoves.filter(m => m.capture).map(m => `${m.row},${m.col}`));
+
+  // 第一遍：移除不再有棋子的位置上的DOM元素
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      const el = pieceEls[r][c];
+      if (el && !board[r][c]) {
+        el.remove();
+        pieceEls[r][c] = null;
+      }
+    }
+  }
+
+  // 第二遍：更新/创建棋子元素
   for (let r = 0; r < ROWS; r++) {
     for (let c = 0; c < COLS; c++) {
       const p = board[r][c];
       if (!p) continue;
-      const el = document.createElement("div");
-      el.className = `piece ${p.color === "r" ? "red" : "black"}`;
-      if (selected && selected.row === r && selected.col === c) {
-        el.classList.add("selected");
+
+      let el = pieceEls[r][c];
+      if (!el) {
+        el = document.createElement("div");
+        el.addEventListener("click", () => onPieceClick(r, c));
+        piecesC.appendChild(el);
+        pieceEls[r][c] = el;
       }
-      if (captureTargets.has(`${r},${c}`)) {
-        el.classList.add("capturable");
-      }
+
+      const classes = `piece ${p.color === "r" ? "red" : "black"}`;
+      el.className = classes
+        + (selected && selected.row === r && selected.col === c ? " selected" : "")
+        + (captureTargets.has(`${r},${c}`) ? " capturable" : "");
       el.textContent = p.type;
       el.style.left = (PAD + c * CELL) + "px";
       el.style.top  = (PAD + r * CELL) + "px";
-      el.addEventListener("click", () => onPieceClick(r, c));
-      piecesC.appendChild(el);
     }
   }
+
+  // 清除旧的可走指示器
+  moveIndicatorEls.forEach(el => el.remove());
+  moveIndicatorEls = [];
+
+  // 创建可走指示器
   validMoves.forEach(m => {
-    if (m.capture) {
-      const ring = document.createElement("div");
-      ring.className = "capture-ring";
-      ring.style.left = (PAD + m.col * CELL) + "px";
-      ring.style.top  = (PAD + m.row * CELL) + "px";
-      ring.addEventListener("click", (e) => {
-        e.stopPropagation();
-        doMove(selected.row, selected.col, m.row, m.col).catch(console.error);
-      });
-      piecesC.appendChild(ring);
-    } else {
-      const dot = document.createElement("div");
-      dot.className = "move-dot";
-      dot.style.left = (PAD + m.col * CELL) + "px";
-      dot.style.top  = (PAD + m.row * CELL) + "px";
-      dot.addEventListener("click", (e) => {
-        e.stopPropagation();
-        doMove(selected.row, selected.col, m.row, m.col).catch(console.error);
-      });
-      piecesC.appendChild(dot);
-    }
+    const el = document.createElement("div");
+    el.className = m.capture ? "capture-ring" : "move-dot";
+    el.style.left = (PAD + m.col * CELL) + "px";
+    el.style.top  = (PAD + m.row * CELL) + "px";
+    el.addEventListener("click", (e) => {
+      e.stopPropagation();
+      doMove(selected.row, selected.col, m.row, m.col).catch(console.error);
+    });
+    piecesC.appendChild(el);
+    moveIndicatorEls.push(el);
   });
 }
 
@@ -401,6 +419,8 @@ async function doMove(fromR, fromC, toR, toC) {
         piece: board[fromR][fromC],
         captured,
       });
+      // 每步走棋后重置消息，只反映当前步的结果
+      msgEl.textContent = "";
       if (captured) {
         if (captured.color === "r") capturedRed.push(captured);
         else capturedBlack.push(captured);
@@ -408,7 +428,7 @@ async function doMove(fromR, fromC, toR, toC) {
         renderCaptured();
       }
       if (data.check) {
-        msgEl.textContent = (msgEl.textContent || "") + " 将军！";
+        msgEl.textContent = msgEl.textContent ? "吃子并将军！" : "将军！";
       }
       // 用后端返回的新棋盘
       board = data.new_board;
@@ -437,6 +457,7 @@ async function doMove(fromR, fromC, toR, toC) {
     piece: board[fromR][fromC],
     captured: capturedLocal,
   });
+  msgEl.textContent = "";
   if (capturedLocal) {
     if (capturedLocal.color === "r") capturedRed.push(capturedLocal);
     else capturedBlack.push(capturedLocal);
@@ -456,23 +477,66 @@ async function doMove(fromR, fromC, toR, toC) {
 // ============================================================
 //  悔棋
 // ============================================================
-document.getElementById("btn-undo").addEventListener("click", () => {
+document.getElementById("btn-undo").addEventListener("click", async () => {
   if (history.length === 0) return;
-  const last = history.pop();
-  board[last.from.row][last.from.col] = last.piece;
-  board[last.to.row][last.to.col] = last.captured;
-  if (last.captured) {
-    if (last.captured.color === "r") capturedRed.pop();
-    else capturedBlack.pop();
-    renderCaptured();
+
+  if (useBackend && gameSessionId) {
+    try {
+      const resp = await fetch(`/api/game/${gameSessionId}/undo`, { method: "POST" });
+      if (!resp.ok) throw new Error("undo failed");
+      const data = await resp.json();
+      // 用后端返回的准确状态覆盖本地
+      board = data.board;
+      turn = data.turn;
+      syncedStepCount = data.step_count;
+      // 同步历史
+      const histResp = await fetch(`/api/game/${gameSessionId}/history`);
+      const histData = await histResp.json();
+      history = histData.moves.map(m => ({
+        from: { row: m.from_row, col: m.from_col },
+        to: { row: m.to_row, col: m.to_col },
+        piece: { type: m.piece_type, color: m.piece_color },
+        captured: m.captured_type ? { type: m.captured_type, color: m.captured_color } : null,
+      }));
+      capturedRed = [];
+      capturedBlack = [];
+      history.forEach(step => {
+        if (step.captured) {
+          if (step.captured.color === "r") capturedRed.push(step.captured);
+          else capturedBlack.push(step.captured);
+        }
+      });
+    } catch (err) {
+      console.warn("后端悔棋失败，使用本地规则", err);
+      // 本地兜底
+      const last = history.pop();
+      board[last.from.row][last.from.col] = last.piece;
+      board[last.to.row][last.to.col] = last.captured;
+      if (last.captured) {
+        if (last.captured.color === "r") capturedRed.pop();
+        else capturedBlack.pop();
+      }
+      turn = last.piece.color;
+    }
+  } else {
+    // 纯本地模式
+    const last = history.pop();
+    board[last.from.row][last.from.col] = last.piece;
+    board[last.to.row][last.to.col] = last.captured;
+    if (last.captured) {
+      if (last.captured.color === "r") capturedRed.pop();
+      else capturedBlack.pop();
+    }
+    turn = last.piece.color;
   }
-  turn = last.piece.color;
+
   selected = null;
   validMoves = [];
   gameOver = false;
   updateTurn();
   drawBoard();
   renderPieces();
+  renderCaptured();
   msgEl.textContent = "";
 });
 
@@ -485,24 +549,23 @@ document.getElementById("btn-restart").addEventListener("click", () => {
 
 // ============================================================
 //  轮询：检测外部走棋（如 test_api.py 直接调 API）
+//  单次请求 /api/game/{id}，通过 step_count 检测变化
 // ============================================================
 function startPolling() {
   if (pollingTimer) clearInterval(pollingTimer);
   pollingTimer = setInterval(async () => {
     if (!useBackend || !gameSessionId || gameOver) return;
     try {
-      const resp = await fetch(`/api/game/${gameSessionId}/history`);
+      const resp = await fetch(`/api/game/${gameSessionId}`);
       const data = await resp.json();
-      const remoteSteps = (data.moves || []).length;
-      if (remoteSteps !== syncedStepCount) {
-        // 外部走棋了，重新加载棋盘
-        const gameResp = await fetch(`/api/game/${gameSessionId}`);
-        const gameData = await gameResp.json();
-        board = gameData.board;
-        turn = gameData.turn;
-        syncedStepCount = remoteSteps;
-        // 同步 history、captured
-        history = data.moves.map(m => ({
+      if (data.step_count !== syncedStepCount) {
+        syncedStepCount = data.step_count;
+        board = data.board;
+        turn = data.turn;
+        // 重新加载历史（用于悔棋和被吃棋子展示）
+        const histResp = await fetch(`/api/game/${gameSessionId}/history`);
+        const histData = await histResp.json();
+        history = histData.moves.map(m => ({
           from: { row: m.from_row, col: m.from_col },
           to: { row: m.to_row, col: m.to_col },
           piece: { type: m.piece_type, color: m.piece_color },
@@ -518,13 +581,14 @@ function startPolling() {
         });
         selected = null;
         validMoves = [];
+        msgEl.textContent = "";
         updateTurn();
         drawBoard();
         renderPieces();
         renderCaptured();
-        if (gameData.status !== "ongoing") {
+        if (data.status !== "ongoing") {
           gameOver = true;
-          msgEl.textContent = gameData.status === "red_win" ? "红方胜！" : "黑方胜！";
+          msgEl.textContent = data.status === "red_win" ? "红方胜！" : "黑方胜！";
         }
       }
     } catch (e) { /* 忽略轮询错误 */ }

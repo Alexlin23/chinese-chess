@@ -141,3 +141,54 @@ def get_step_count(game_id: int) -> int:
     ).fetchone()
     conn.close()
     return row["cnt"] or 0
+
+
+def delete_last_move(game_id: int) -> Optional[dict]:
+    """删除对局最后一步，返回被删记录（用于回滚）。无记录时返回 None。"""
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT * FROM moves WHERE game_id = ? ORDER BY step DESC LIMIT 1",
+        (game_id,)
+    ).fetchone()
+    if not row:
+        conn.close()
+        return None
+    move = dict(row)
+    conn.execute("DELETE FROM moves WHERE id = ?", (row["id"],))
+    conn.commit()
+    conn.close()
+    return move
+
+
+def undo_game(game_id: int, initial_board_factory) -> Optional[dict]:
+    """悔棋：删除最后一步，重放剩余步数重建棋盘。返回 (board, turn, status) 或 None。"""
+    game = get_game(game_id)
+    if not game:
+        return None
+
+    deleted = delete_last_move(game_id)
+    if not deleted:
+        return None
+
+    # 从初始棋盘重放所有剩余步数
+    board = initial_board_factory()
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT * FROM moves WHERE game_id = ? ORDER BY step",
+        (game_id,)
+    ).fetchall()
+    conn.close()
+
+    for row in rows:
+        fr, fc = row["from_row"], row["from_col"]
+        tr, tc = row["to_row"], row["to_col"]
+        piece = board[fr][fc]
+        board[tr][tc] = piece
+        board[fr][fc] = None
+
+    # 回退轮次：删除的是谁的步就轮到谁
+    turn = deleted["piece_color"]
+    status = "ongoing"
+
+    update_game(game_id, board, turn, status)
+    return {"board": board, "turn": turn, "status": status, "step_count": len(rows)}

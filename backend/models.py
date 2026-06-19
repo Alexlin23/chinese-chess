@@ -47,3 +47,4 @@ class GameInfoResponse(BaseModel):
     board: list[list[Optional[PieceInfo]]]
     turn: str
     status: str
+    step_count: int = 0
