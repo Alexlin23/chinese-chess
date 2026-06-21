@@ -121,9 +121,8 @@ class MCTS:
         if state.is_terminal():
             value = state.result() or 0.0
         else:
-            # 扩展当前节点
-            self._expand(node, state)
-            policy, value = self.evaluator.evaluate(state)
+            # 扩展当前节点（一次 evaluate，返回 value 避免二次调用）
+            value = self._expand(node, state)
 
         # 视角翻转：value 从当前方视角翻转到根方视角
         # 如果 state.turn != root_state.turn，翻转 value
@@ -140,13 +139,21 @@ class MCTS:
 
         root.visit_count += 1
 
-    def _expand(self, node: MCTSNode, state: GameState) -> None:
-        """扩展节点的所有合法子节点。"""
-        policy, _ = self.evaluator.evaluate(state)
-        legal = ActionEncoder.legal_indices(state)
+    def _expand(self, node: MCTSNode, state: GameState) -> float:
+        """扩展节点的所有合法子节点。
 
+        Returns:
+            value: float — 当前局面的价值评分（从当前方视角）
+        """
+        # 一次性获取 legal indices，避免 evaluate() 内部重复计算
+        legal = ActionEncoder.legal_indices(state)
         if len(legal) == 0:
-            return
+            return 0.0
+
+        policy, value = self.evaluator.evaluate(state)
+        uniform_prior = 1.0 / len(legal)
 
         for idx in legal:
-            node.children[idx] = MCTSNode(prior=float(max(policy[idx], 0.001)))
+            node.children[idx] = MCTSNode(
+                prior=float(max(policy[idx], uniform_prior * 0.1)))
+        return value

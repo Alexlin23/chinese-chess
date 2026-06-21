@@ -3,3 +3,5 @@ __pycache__/
 *.pyc
 *.db
 backend/chess.db
+AlphaZero/checkpoints/
+AlphaZero/data/

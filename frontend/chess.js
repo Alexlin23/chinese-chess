@@ -552,6 +552,60 @@ document.getElementById("btn-restart").addEventListener("click", () => {
 });
 
 // ============================================================
+//  AI 走棋
+// ============================================================
+document.getElementById("btn-ai").addEventListener("click", async () => {
+  if (gameOver) return;
+  if (!useBackend || !gameSessionId) {
+    msgEl.textContent = "请先连接后端";
+    return;
+  }
+
+  const btn = document.getElementById("btn-ai");
+  btn.disabled = true;
+  btn.textContent = "AI 思考中...";
+
+  try {
+    const resp = await fetch("/api/ai-move", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        board,
+        turn,
+        from_pos: { row: 0, col: 0 },
+        to_pos: { row: 0, col: 0 },
+      }),
+    });
+
+    if (!resp.ok) {
+      const err = await resp.json();
+      msgEl.textContent = "AI无法走棋: " + (err.detail || "未知错误");
+      return;
+    }
+
+    const data = await resp.json();
+    console.log("AI move:", data.from_pos, "->", data.to_pos);
+    await doMove(data.from_pos.row, data.from_pos.col,
+                 data.to_pos.row, data.to_pos.col);
+  } catch (err) {
+    console.error("AI error:", err);
+    msgEl.textContent = "AI调用失败，请重试";
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "AI 走棋";
+  }
+});
+
+// 快捷键: 按 A 让 AI 走一步
+document.addEventListener("keydown", (e) => {
+  if (e.key === "a" || e.key === "A") {
+    if (!e.ctrlKey && !e.metaKey && document.activeElement === document.body) {
+      document.getElementById("btn-ai").click();
+    }
+  }
+});
+
+// ============================================================
 //  轮询：检测外部走棋（如 test_api.py 直接调 API）
 //  单次请求 /api/game/{id}，通过 step_count 检测变化
 // ============================================================
@@ -819,6 +873,180 @@ function movesPawn(r, c, color) {
   }
   return res;
 }
+
+// ============================================================
+//  自我对弈观战（WebSocket 实时推送）
+// ============================================================
+let spWS = null;              // WebSocket 连接
+let spGameId = null;          // 当前观战对局 ID
+let spActive = false;         // 是否正在观战
+let spPaused = false;         // 是否暂停
+let spStepCount = 0;          // 当前步数
+let spAutoAdvance = true;     // 自动推进
+let spSpeed = 5;              // 速度等级 1-10（对应延迟 1500ms→100ms）
+
+function spSpeedToDelay(speed) {
+  // 速度 1(最慢)=1500ms → 10(最快)=100ms
+  return 1600 - speed * 150;
+}
+
+document.getElementById("self-play-speed").addEventListener("input", (e) => {
+  spSpeed = parseInt(e.target.value);
+  document.getElementById("speed-display").textContent = spSpeed;
+});
+
+document.getElementById("btn-self-play-start").addEventListener("click", async () => {
+  if (spActive) return;
+  if (!useBackend) {
+    msgEl.textContent = "请先连接后端";
+    return;
+  }
+
+  const startBtn = document.getElementById("btn-self-play-start");
+  const stopBtn = document.getElementById("btn-self-play-stop");
+  const statusEl = document.getElementById("sp-status");
+  startBtn.disabled = true;
+  stopBtn.disabled = false;
+  statusEl.textContent = "启动中...";
+
+  try {
+    // 启动自我对弈
+    const resp = await fetch("/api/self-play/start", { method: "POST" });
+    if (!resp.ok) {
+      const err = await resp.json();
+      statusEl.textContent = "启动失败: " + (err.detail || "未知错误");
+      startBtn.disabled = false;
+      stopBtn.disabled = true;
+      return;
+    }
+
+    const data = await resp.json();
+    spGameId = data.game_id;
+    spActive = true;
+    spPaused = false;
+    spStepCount = 0;
+    gameOver = true;  // 观战模式不容许手动走棋
+    document.getElementById("sp-winner").textContent = "";
+    document.getElementById("sp-step").textContent = "步数: 0";
+
+    statusEl.textContent = "连接WS中...";
+
+    // 连接 WebSocket
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    spWS = new WebSocket(`${protocol}//${window.location.host}/ws/watch/${spGameId}`);
+
+    spWS.onopen = () => {
+      statusEl.textContent = "对弈中...";
+      // 重置棋盘到初始状态
+      initBoard();
+      drawBoard();
+      renderPieces();
+      updateTurn();
+    };
+
+    spWS.onmessage = (event) => {
+      const msg = JSON.parse(event.data);
+      handleSPMessage(msg);
+    };
+
+    spWS.onerror = (err) => {
+      console.error("WebSocket error:", err);
+      statusEl.textContent = "连接错误";
+    };
+
+    spWS.onclose = () => {
+      if (spActive) {
+        statusEl.textContent = "连接断开";
+        stopSelfPlay();
+      }
+    };
+
+  } catch (err) {
+    console.error("Self-play start error:", err);
+    statusEl.textContent = "启动失败";
+    startBtn.disabled = false;
+    stopBtn.disabled = true;
+  }
+});
+
+document.getElementById("btn-self-play-stop").addEventListener("click", () => {
+  stopSelfPlay();
+});
+
+function stopSelfPlay() {
+  spActive = false;
+  if (spWS) {
+    spWS.close();
+    spWS = null;
+  }
+  spGameId = null;
+  gameOver = false;
+  document.getElementById("btn-self-play-start").disabled = false;
+  document.getElementById("btn-self-play-stop").disabled = true;
+  document.getElementById("sp-status").textContent = "已停止";
+}
+
+function handleSPMessage(msg) {
+  const statusEl = document.getElementById("sp-status");
+  const stepEl = document.getElementById("sp-step");
+  const winnerEl = document.getElementById("sp-winner");
+
+  if (msg.type === "move") {
+    spStepCount = msg.step;
+    board = msg.board;
+    turn = msg.turn;
+
+    // 更新棋盘
+    drawBoard();
+    renderPieces();
+    updateTurn();
+    stepEl.textContent = `步数: ${spStepCount}`;
+
+    // 显示将军
+    if (msg.check) {
+      msgEl.textContent = "将军！";
+    } else {
+      msgEl.textContent = "";
+    }
+
+    // 终局检测
+    if (msg.game_over) {
+      gameOver = true;
+      const resultText = msg.game_over === "red_win" ? "红方胜！" : "黑方胜！";
+      msgEl.textContent = resultText;
+      winnerEl.textContent = resultText;
+      statusEl.textContent = "对局结束";
+    }
+
+    // 高亮最近一步走法
+    highlightLastMove(msg.from, msg.to);
+
+  } else if (msg.type === "game_over") {
+    gameOver = true;
+    spActive = false;
+    statusEl.textContent = "对局结束";
+    const resultText = msg.result === "red_win" ? "红方胜！" :
+                       msg.result === "black_win" ? "黑方胜！" : "和棋！";
+    msgEl.textContent = resultText;
+    winnerEl.textContent = resultText;
+    stepEl.textContent = `步数: ${msg.total_steps}`;
+    document.getElementById("btn-self-play-start").disabled = false;
+    document.getElementById("btn-self-play-stop").disabled = true;
+
+  } else if (msg.type === "error") {
+    statusEl.textContent = "错误: " + msg.message;
+  }
+}
+
+function highlightLastMove(fromArr, toArr) {
+  // 在棋盘上高亮最后一步的起止位置
+  // 简单实现：延迟清除
+  setTimeout(() => {
+    drawBoard();
+    renderPieces();
+  }, spSpeedToDelay(spSpeed) * 0.8);
+}
+
 
 // ============================================================
 //  启动
