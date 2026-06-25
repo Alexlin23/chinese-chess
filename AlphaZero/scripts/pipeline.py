@@ -246,32 +246,47 @@ def pipeline(config: AlphaZeroConfig,
             'stats': stats,
         }, candidate_path)
 
-        # Arena 评估
-        print(f"  Arena: {config.arena_games} 局 vs 旧模型...")
-        monitor.update(phase='arena', arena_w=0, arena_l=0, arena_d=0)
-
-        arena_result = arena.evaluate(candidate_path, model_old_path)
-        print(f"  结果: W={arena_result['wins']} L={arena_result['losses']} "
-              f"D={arena_result['draws']} score={arena_result['score_rate']:.1%}")
-
-        # 更新监控
-        monitor.update(
-            arena_w=arena_result['wins'],
-            arena_l=arena_result['losses'],
-            arena_d=arena_result['draws'],
-        )
-
-        if arena_result['should_promote']:
-            print(f"  ✓ 晋升")
+        # Arena 评估（第一轮直接晋升）
+        if it == start:
+            # 第一轮直接晋升，不做 Arena
+            print(f"  ✓ 第一轮直接晋升")
             total_promoted += 1
+            arena_result = {'wins': 0, 'losses': 0, 'draws': 0,
+                           'score_rate': 1.0, 'should_promote': True}
             torch.save({'model_state_dict': model.state_dict(),
                         'iteration': it, 'config': config.to_dict()},
                        best_model_path)
         else:
-            print(f"  ✗ 回滚")
-            ck = torch.load(model_old_path, map_location=device)
-            model.load_state_dict(ck['model_state_dict'])
-            trainer.model.load_state_dict(ck['model_state_dict'])
+            print(f"  Arena: {config.arena_games} 局 vs 旧模型...")
+            monitor.update(phase='arena', arena_w=0, arena_l=0, arena_d=0)
+
+            arena_result = arena.evaluate(candidate_path, model_old_path)
+            print(f"  结果: W={arena_result['wins']} L={arena_result['losses']} "
+                  f"D={arena_result['draws']} score={arena_result['score_rate']:.1%}")
+
+            # 更新监控
+            monitor.update(
+                arena_w=arena_result['wins'],
+                arena_l=arena_result['losses'],
+                arena_d=arena_result['draws'],
+            )
+
+            # 晋升条件：score >= 阈值 或 全平局（新模型不比旧模型差）
+            should_promote = (
+                arena_result['should_promote'] or
+                (arena_result['losses'] == 0 and arena_result['wins'] == 0)
+            )
+            if should_promote:
+                print(f"  ✓ 晋升")
+                total_promoted += 1
+                torch.save({'model_state_dict': model.state_dict(),
+                            'iteration': it, 'config': config.to_dict()},
+                           best_model_path)
+            else:
+                print(f"  ✗ 回滚")
+                ck = torch.load(model_old_path, map_location=device)
+                model.load_state_dict(ck['model_state_dict'])
+                trainer.model.load_state_dict(ck['model_state_dict'])
 
         # 更新监控
         monitor.update(promoted=total_promoted)
