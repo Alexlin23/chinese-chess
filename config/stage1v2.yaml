@@ -18,7 +18,7 @@ self_play:
   temperature_ply: 30
 
 training:
-  batch_size: 512
+  batch_size: 1024        # GPU 121GB，用满显存
   lr: 0.2
   lr_momentum: 0.9
   weight_decay: 0.0001
@@ -34,9 +34,9 @@ arena:
   threshold: 0.55
 
 parallel:
-  workers: 16
-  inference_batch: 256   # InferenceServer batch 要 >= workers * mcts.batch_size
-  inference_wait_ms: 2.0 # 缩短等待
+  workers: 18             # CPU 20核，多用2核
+  inference_batch: 512    # 减少通信次数
+  inference_wait_ms: 2.0
 
 system:
   checkpoint_dir: "AlphaZero/checkpoints"
