@@ -149,9 +149,9 @@ def pipeline(config: AlphaZeroConfig,
     ).to(device)
     start = 0
 
-    if resume:
+    if resume is not None:
         # 支持 --resume 或 --resume path
-        if resume == True or resume == '':
+        if resume == '':
             # 自动从 best.pt 继续
             resume_path = str(out / "best.pt")
             if not Path(resume_path).exists():
