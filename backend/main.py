@@ -38,7 +38,7 @@ def _get_neural_mcts():
     """懒加载：创建/获取神经网络 MCTS 实例"""
     global _neural_model, _neural_evaluator, _neural_mcts
     if _neural_mcts is None:
-        ckpt_dir = _Path("AlphaZero/checkpoints")
+        ckpt_dir = _Path(__file__).parent.parent / "AlphaZero" / "checkpoints"
         best = ckpt_dir / "best.pt"
         latest = ckpt_dir / "latest.pt"
         model_path = best if best.exists() else latest

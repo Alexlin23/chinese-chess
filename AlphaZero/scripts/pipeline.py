@@ -150,10 +150,22 @@ def pipeline(config: AlphaZeroConfig,
     start = 0
 
     if resume:
-        ck = torch.load(resume, map_location=device, weights_only=False)
-        model.load_state_dict(ck['model_state_dict'])
-        start = ck.get('iteration', 0) + 1
-        print(f"恢复训练: {resume} (iteration {start})")
+        # 支持 --resume 或 --resume path
+        if resume == True or resume == '':
+            # 自动从 best.pt 继续
+            resume_path = str(out / "best.pt")
+            if not Path(resume_path).exists():
+                resume_path = str(out / "latest.pt")
+        else:
+            resume_path = resume
+        
+        if Path(resume_path).exists():
+            ck = torch.load(resume_path, map_location=device, weights_only=False)
+            model.load_state_dict(ck['model_state_dict'])
+            start = ck.get('iteration', 0) + 1
+            print(f"恢复训练: {resume_path} (iteration {start})")
+        else:
+            print(f"⚠ 未找到 checkpoint: {resume_path}，从头开始")
     elif checkpoint:
         ck = torch.load(checkpoint, map_location=device, weights_only=False)
         model.load_state_dict(ck['model_state_dict'])
@@ -320,7 +332,8 @@ if __name__ == "__main__":
     p.add_argument("--config", type=str, default="config/default.yaml",
                    help="YAML 配置文件路径")
     p.add_argument("--checkpoint", type=str, default=None)
-    p.add_argument("--resume", type=str, default=None)
+    p.add_argument("--resume", type=str, nargs='?', const='', default=None,
+                   help="从 checkpoint 继续训练。不指定路径则自动从 best.pt 继续")
     p.add_argument("--output", type=str, default=None)
     p.add_argument("--iterations", type=int, default=None)
     p.add_argument("--workers", type=int, default=None, help="覆盖配置文件中的 workers")
