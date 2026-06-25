@@ -13,7 +13,7 @@ mcts:
   c_puct: 1.5             # PUCT探索系数
   dirichlet_alpha: 0.3    # Dirichlet噪声浓度
   dirichlet_epsilon: 0.25 # 噪声混合比例
-  batch_size: 256         # 推理batch大小
+  batch_size: 800         # = simulations，一轮完成
 
 # ── 自我对弈 ──
 self_play:
