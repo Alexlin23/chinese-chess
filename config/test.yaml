@@ -1,0 +1,38 @@
+# 轻量级配置 — 用于快速测试
+
+model:
+  blocks: 4
+  filters: 32
+
+mcts:
+  simulations: 16
+  c_puct: 1.5
+  batch_size: 32
+
+self_play:
+  games: 10
+  max_ply: 100
+  temperature_ply: 20
+
+training:
+  batch_size: 64
+  lr: 0.01
+  epochs: 2
+  replay_buffer: 5000
+  samples_per_epoch: 1000
+
+arena:
+  games: 4
+  threshold: 0.55
+
+parallel:
+  workers: 2
+  inference_batch: 16
+  inference_wait_ms: 5.0
+
+system:
+  checkpoint_dir: "AlphaZero/checkpoints_test"
+  monitor_interval: 5
+
+pipeline:
+  max_iterations: 3

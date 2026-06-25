@@ -25,13 +25,8 @@ import sys as _sys
 from pathlib import Path as _Path
 _sys.path.insert(0, str(_Path(__file__).parent.parent))
 from AlphaZero.engine import GameState as _AlphaGameState
-from AlphaZero.search import MCTS as _AlphaMCTS, RandomEvaluator as _RandomEval
-from AlphaZero.model import AlphaZeroNet as _AlphaNet, NeuralEvaluator as _NeuralEval
-from AlphaZero.train.config import cpu_config as _cpu_config
-from AlphaZero.train.self_play import SelfPlayGame as _SelfPlayGame
-
-_ai_evaluator = _RandomEval(seed=42)
-_ai_mcts = _AlphaMCTS(_ai_evaluator, num_simulations=200, c_puct=1.5)
+from AlphaZero.search import MCTS as _AlphaMCTS
+from AlphaZero.model import PolicyWDLEncoder as _PolicyWDLNet, NeuralEvaluator as _NeuralEval
 
 # 神经网络评估器（懒加载）
 _neural_model = None
@@ -43,23 +38,28 @@ def _get_neural_mcts():
     """懒加载：创建/获取神经网络 MCTS 实例"""
     global _neural_model, _neural_evaluator, _neural_mcts
     if _neural_mcts is None:
-        cfg = _cpu_config()
-        _neural_model = _AlphaNet(num_blocks=cfg.num_blocks,
-                                  num_filters=cfg.num_filters)
-        # 尝试加载最新 checkpoint
-        ckpt_dir = _Path(cfg.checkpoint_dir)
-        ckpts = sorted(ckpt_dir.glob("model_iter*.pt")) if ckpt_dir.exists() else []
-        if ckpts:
-            print(f"加载最新模型: {ckpts[-1]}")
-            state = __import__('torch').load(str(ckpts[-1]),
-                                             map_location='cpu', weights_only=True)
+        ckpt_dir = _Path("AlphaZero/checkpoints")
+        best = ckpt_dir / "best.pt"
+        latest = ckpt_dir / "latest.pt"
+        model_path = best if best.exists() else latest
+        if model_path.exists():
+            print(f"加载模型: {model_path}")
+            state = __import__('torch').load(str(model_path),
+                                             map_location='cpu', weights_only=False)
+            cfg = state.get('config', {})
+            _neural_model = _PolicyWDLNet(
+                num_blocks=cfg.get('num_blocks', 8),
+                num_filters=cfg.get('num_filters', 128))
             _neural_model.load_state_dict(state['model_state_dict'])
-        _neural_evaluator = _NeuralEval(_neural_model)
-        _neural_mcts = _AlphaMCTS(
-            _neural_evaluator,
-            num_simulations=cfg.num_simulations,
-            c_puct=cfg.c_puct,
-        )
+            _neural_evaluator = _NeuralEval(_neural_model)
+            _neural_mcts = _AlphaMCTS(
+                _neural_evaluator,
+                num_simulations=cfg.get('num_simulations', 800),
+                c_puct=cfg.get('c_puct', 1.5),
+            )
+        else:
+            print("没有找到 checkpoint，请先训练模型")
+            return None
     return _neural_mcts
 
 
@@ -143,7 +143,7 @@ def api_move(req: MoveRequest):
 
     game_over = None
     game_status = "ongoing"
-    if result in ("red_win", "black_win"):
+    if result in ("red_win", "black_win", "draw"):
         game_over = result
         game_status = result
 
@@ -237,7 +237,11 @@ def api_ai_move(req: MoveRequest):
     board = _parse_board(req.board)
     state = _board_to_gamestate(board, req.turn)
 
-    move, _ = _ai_mcts.select_move(state, temperature=0.0)
+    neural_mcts = _get_neural_mcts()
+    if neural_mcts is None:
+        raise HTTPException(status_code=503, detail="模型未加载，请先训练")
+
+    move, _ = neural_mcts.select_move(state, temperature=0.0)
     if move is None:
         raise HTTPException(status_code=400, detail="AI找不到合法走法")
 
@@ -272,125 +276,6 @@ async def ws_watch_game(ws: WebSocket, game_id: int):
         pass
     finally:
         ws_manager.disconnect(game_id, ws)
-
-
-# ============================================================
-#  自我对弈（Demo 观战 + 后台训练）
-# ============================================================
-
-@app.post("/api/self-play/start")
-async def api_self_play_start():
-    """启动一局神经网络自我对弈（用于前端实时观战）。
-
-    返回 game_id，前端可通过 WebSocket /ws/watch/{game_id} 实时观看，
-    或通过 /api/game/{game_id}/history 回放。
-    """
-    import asyncio
-
-    # 创建对局记录
-    board = create_initial_board()
-    game_id = create_game(board)
-
-    # 后台启动自我对弈
-    asyncio.create_task(_run_self_play_demo(game_id))
-
-    return {"game_id": game_id, "message": "自我对弈已启动，请通过 WebSocket 观看"}
-
-
-async def _run_self_play_demo(game_id: int):
-    """后台任务：运行一局神经网络自我对弈，每步推送到 WebSocket。
-
-    与 bulk 训练不同，此函数:
-      - 每步延迟 0.5s（方便人类观看）
-      - 实时推送到 WebSocket
-      - 写入数据库供回放
-    """
-    import time
-    import asyncio
-    import numpy as np
-
-    try:
-        mcts = _get_neural_mcts()
-        cfg = _cpu_config()
-
-        # 使用 SelfPlayGame 逐步执行
-        game = _SelfPlayGame(mcts, cfg, game_id=game_id)
-
-        while not game.is_terminal():
-            # 执行一步
-            move_record = game.step()
-            if move_record is None:
-                break
-
-            # 获取当前棋盘状态
-            board_dict = game.current_board_dict()
-            turn_str = "r" if game.state.turn else "b"
-            result = game.state.result()
-            game_over = None
-            if result is not None:
-                if result > 0.5:
-                    game_over = "red_win"
-                elif result < -0.5:
-                    game_over = "black_win"
-                else:
-                    game_over = "draw"
-
-            # 写入数据库
-            try:
-                from database import record_step
-                record_step(
-                    game_id=game_id,
-                    step=move_record["step"],
-                    board=_serialize_board(board_dict),
-                    turn=turn_str,
-                    from_pos={"row": move_record["from_row"],
-                              "col": move_record["from_col"]},
-                    to_pos={"row": move_record["to_row"],
-                            "col": move_record["to_col"]},
-                    piece={"type": "", "color": ""},  # 简化
-                    captured=None,
-                    status=game_over or "ongoing",
-                )
-            except Exception as e:
-                print(f"DB write error: {e}")
-
-            # WebSocket 广播
-            await ws_manager.broadcast(game_id, {
-                "type": "move",
-                "step": move_record["step"],
-                "from": [move_record["from_row"], move_record["from_col"]],
-                "to": [move_record["to_row"], move_record["to_col"]],
-                "board": _serialize_board(board_dict),
-                "turn": turn_str,
-                "check": game.state.is_in_check(),
-                "game_over": game_over,
-            })
-
-            # 延迟以便观看（终局前最后几步不减慢）
-            delay = 0.8 if not game.is_terminal() else 0.3
-            await asyncio.sleep(delay)
-
-        # 对局结束
-        final_result = game.result()
-        result_str = "draw"
-        if final_result and final_result > 0.5:
-            result_str = "red_win"
-        elif final_result and final_result < -0.5:
-            result_str = "black_win"
-
-        await ws_manager.broadcast(game_id, {
-            "type": "game_over",
-            "result": result_str,
-            "total_steps": game.state.move_count,
-        })
-
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        await ws_manager.broadcast(game_id, {
-            "type": "error",
-            "message": str(e),
-        })
 
 
 # ============================================================

@@ -1,0 +1,43 @@
+# 正式训练配置
+# mcts.batch_size = mcts.simulations，一轮完成所有推理
+
+model:
+  blocks: 20
+  filters: 256
+
+mcts:
+  simulations: 100
+  c_puct: 1.5
+  dirichlet_alpha: 0.3
+  dirichlet_epsilon: 0.25
+  batch_size: 100        # = simulations，只做一轮往返
+
+self_play:
+  games: 100
+  max_ply: 300
+  temperature_ply: 30
+
+training:
+  batch_size: 512
+  lr: 0.2
+  lr_momentum: 0.9
+  weight_decay: 0.0001
+  epochs: 5
+  replay_buffer: 100000
+  samples_per_epoch: 50000
+
+arena:
+  games: 20
+  threshold: 0.55
+
+parallel:
+  workers: 16
+  inference_batch: 256   # InferenceServer batch 要 >= workers * mcts.batch_size
+  inference_wait_ms: 2.0 # 缩短等待
+
+system:
+  checkpoint_dir: "AlphaZero/checkpoints"
+  monitor_interval: 3
+
+pipeline:
+  max_iterations: 5

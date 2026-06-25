@@ -1,17 +1,26 @@
-"""MCTS 核心搜索 — PUCT 选择 + 扩展 + 回传"""
+"""MCTS 核心搜索 — Leaf-Parallel Batch 版本
+
+关键优化:
+  1. 串行选择 batch_size 个叶节点
+  2. 收集后一次 batch evaluate（GPU batch 推理）
+  3. 批量回传结果
+"""
 import numpy as np
 
 from ..engine.move import ActionEncoder
 from ..engine.state import GameState
+from ..engine.constants import POLICY_SIZE
 from .node import MCTSNode
 from .evaluator import Evaluator
 
 
 class MCTS:
-    """蒙特卡洛树搜索。
+    """Leaf-Parallel Batch MCTS。
 
-    每次 search() 执行 num_simulations 次模拟，
-    返回根节点的走法概率分布。
+    每轮:
+      1. 串行选择 batch_size 个叶节点
+      2. batch evaluate 所有叶节点
+      3. 批量回传
     """
 
     def __init__(self,
@@ -19,141 +28,190 @@ class MCTS:
                  num_simulations: int = 800,
                  c_puct: float = 1.5,
                  dirichlet_alpha: float = 0.3,
-                 dirichlet_epsilon: float = 0.25):
+                 dirichlet_epsilon: float = 0.25,
+                 batch_size: int = 32):
         self.evaluator = evaluator
         self.num_simulations = num_simulations
         self.c_puct = c_puct
         self.dirichlet_alpha = dirichlet_alpha
         self.dirichlet_epsilon = dirichlet_epsilon
+        self.batch_size = batch_size
 
     def search(self, root_state: GameState,
                temperature: float = 1.0) -> np.ndarray:
-        """执行完整搜索。
-
-        Args:
-            root_state: 根局面
-            temperature: τ，1.0 为按访问次数比例采样，→0 为贪心
-
-        Returns:
-            np.ndarray shape (POLICY_SIZE,) — 走法概率分布
-        """
+        """执行完整搜索，返回 (8100,) 策略分布。"""
         if root_state.is_terminal():
-            return np.zeros(ActionEncoder.POLICY_SIZE, dtype=np.float32)
+            return np.zeros(POLICY_SIZE, dtype=np.float32)
 
         # 创建根节点并扩展
         root = MCTSNode(prior=1.0)
         self._expand(root, root_state)
 
-        # 添加 Dirichlet 噪声到根节点（鼓励探索）
-        legal = ActionEncoder.legal_indices(root_state)
-        if len(legal) > 1:
+        # 添加 Dirichlet 噪声到根节点
+        legal_moves = root_state.legal_moves()
+        if len(legal_moves) > 1:
+            legal_actions = ActionEncoder.legal_actions(legal_moves)
             noise = np.random.dirichlet(
-                [self.dirichlet_alpha] * len(legal)
+                [self.dirichlet_alpha] * len(legal_actions)
             )
-            for i, idx in enumerate(legal):
-                root.children[idx].prior = (
-                    (1 - self.dirichlet_epsilon) * root.children[idx].prior
-                    + self.dirichlet_epsilon * noise[i]
-                )
+            for i, idx in enumerate(legal_actions):
+                if idx in root.children:
+                    root.children[idx].prior = (
+                        (1 - self.dirichlet_epsilon) * root.children[idx].prior
+                        + self.dirichlet_epsilon * noise[i]
+                    )
 
-        # 执行模拟
-        for _ in range(self.num_simulations):
-            self._simulate(root, root_state)
+        # ── Batch 搜索 ──
+        sims_done = 0
+        while sims_done < self.num_simulations:
+            batch_count = min(self.batch_size, self.num_simulations - sims_done)
+
+            # 1) 串行选择 batch_count 个叶节点
+            leaves = []
+            for _ in range(batch_count):
+                leaf = self._select_leaf(root, root_state)
+                if leaf is not None:
+                    leaves.append(leaf)
+
+            if not leaves:
+                break
+
+            # 2) 分离终局和非终局
+            terminal_leaves = [l for l in leaves if l[3]]
+            nonterminal_leaves = [l for l in leaves if not l[3]]
+
+            # 终局节点直接回传
+            for node, state, path, is_term, term_val in terminal_leaves:
+                value = term_val
+                if state.turn != root_state.turn:
+                    value = -value
+                self._backup(path, value, root)
+
+            # 非终局节点 batch evaluate
+            if nonterminal_leaves:
+                states = [s for _, s, _, _, _ in nonterminal_leaves]
+                policies, values = self.evaluator.evaluate_batch(states)
+
+                for i, (node, state, path, _, _) in enumerate(nonterminal_leaves):
+                    policy = policies[i]
+                    value = float(values[i])
+
+                    # 扩展节点
+                    legal_moves = state.legal_moves()
+                    legal_actions = ActionEncoder.legal_actions(legal_moves)
+                    uniform_prior = 1.0 / max(len(legal_actions), 1)
+                    for idx in legal_actions:
+                        node.children[int(idx)] = MCTSNode(
+                            prior=float(max(policy[idx], uniform_prior * 0.1)))
+
+                    # 视角翻转
+                    if state.turn != root_state.turn:
+                        value = -value
+
+                    # 回传
+                    self._backup(path, value, root)
+
+            sims_done += batch_count
 
         # 从访问次数计算概率分布
-        policy = np.zeros(ActionEncoder.POLICY_SIZE, dtype=np.float32)
+        policy = np.zeros(POLICY_SIZE, dtype=np.float32)
         total_visits = sum(c.visit_count for c in root.children.values())
 
+        if total_visits == 0:
+            for idx in root.children:
+                policy[idx] = 1.0 / len(root.children)
+            return policy
+
         if temperature == 0.0:
-            # 贪心：选访问最多的
             best_idx = max(root.children.keys(),
                            key=lambda k: root.children[k].visit_count)
             policy[best_idx] = 1.0
-        elif total_visits > 0:
+        else:
             for idx, child in root.children.items():
-                # P ∝ N^(1/τ)
                 policy[idx] = child.visit_count ** (1.0 / temperature)
-            policy /= policy.sum()
+            s = policy.sum()
+            if s > 0:
+                policy /= s
+            else:
+                for idx in root.children:
+                    policy[idx] = 1.0 / len(root.children)
 
         return policy
 
     def select_move(self, root_state: GameState,
-                    temperature: float = 1.0) -> tuple[object, np.ndarray]:
-        """搜索并采样一步走法。
-
-        Returns:
-            (selected_move: Move, search_probs: np.ndarray)
-        """
+                    temperature: float = 1.0) -> tuple:
+        """搜索并采样一步走法。返回 (Move, policy)"""
         probs = self.search(root_state, temperature)
-        legal = ActionEncoder.legal_indices(root_state)
-        if len(legal) == 0:
+        legal_moves = root_state.legal_moves()
+        if not legal_moves:
             return None, probs
 
+        legal_actions = ActionEncoder.legal_actions(legal_moves)
+
         if temperature == 0.0:
-            idx = np.argmax(probs)
+            idx = int(np.argmax(probs))
         else:
-            # 按概率采样
-            probs_legal = probs[legal]
-            probs_legal /= probs_legal.sum()  # 重新归一化
-            idx = legal[np.random.choice(len(legal), p=probs_legal)]
+            probs_legal = probs[legal_actions].copy()
+            s = probs_legal.sum()
+            if s > 0:
+                probs_legal /= s
+            else:
+                probs_legal = np.ones(len(legal_actions)) / len(legal_actions)
+            idx = int(legal_actions[np.random.choice(len(legal_actions), p=probs_legal)])
 
-        return ActionEncoder.decode(int(idx)), probs
+        move = ActionEncoder.decode(idx)
+        return move, probs
 
-    # ── 内部方法 ──
+    # ── 选择 ──
 
-    def _simulate(self, root: MCTSNode, root_state: GameState) -> None:
-        """一次完整的 MCTS 模拟：选择 → 扩展 → 评估 → 回传。"""
+    def _select_leaf(self, root: MCTSNode, root_state: GameState):
+        """选择一个叶节点。"""
         node = root
-        state = root_state
-        path = []  # [(node, move_index), ...]
+        state = root_state.copy()
+        path = []
 
-        # 1) Select: 沿 PUCT 最大路径走到叶节点
         while node.is_expanded() and not state.is_terminal():
             idx = node.select_child(self.c_puct)
             if idx < 0 or idx not in node.children:
                 break
+            path.append((node, idx))
             node = node.children[idx]
             move = ActionEncoder.decode(idx)
+            if move is None:
+                break
             state = state.apply(move)
-            path.append((node, idx))
 
-        # 2) Expand + Evaluate
         if state.is_terminal():
-            value = state.result() or 0.0
-        else:
-            # 扩展当前节点（一次 evaluate，返回 value 避免二次调用）
-            value = self._expand(node, state)
+            r = state.game_result()
+            if r is None:
+                value = 0.0
+            else:
+                value = r.to_value(state.turn)
+            return (node, state, path, True, value)
 
-        # 视角翻转：value 从当前方视角翻转到根方视角
-        # 如果 state.turn != root_state.turn，翻转 value
-        if state.turn != root_state.turn:
+        return (node, state, path, False, 0.0)
+
+    def _backup(self, path, value, root):
+        """沿路径回传值。"""
+        for node, _ in reversed(path):
+            node.visit_count += 1
+            node.total_value += value
             value = -value
-
-        # 3) Backup: 沿路径回传
-        # 注意：path 中的节点对应的是走棋后的状态
-        # value 需要沿路径交替翻转
-        for n, _ in reversed(path):
-            n.visit_count += 1
-            n.total_value += value
-            value = -value  # 下一层是对方视角
-
         root.visit_count += 1
 
-    def _expand(self, node: MCTSNode, state: GameState) -> float:
-        """扩展节点的所有合法子节点。
+    # ── 扩展 ──
 
-        Returns:
-            value: float — 当前局面的价值评分（从当前方视角）
-        """
-        # 一次性获取 legal indices，避免 evaluate() 内部重复计算
-        legal = ActionEncoder.legal_indices(state)
-        if len(legal) == 0:
+    def _expand(self, node: MCTSNode, state: GameState) -> float:
+        """扩展节点的所有合法子节点。"""
+        legal_moves = state.legal_moves()
+        if not legal_moves:
             return 0.0
 
         policy, value = self.evaluator.evaluate(state)
-        uniform_prior = 1.0 / len(legal)
+        legal_actions = ActionEncoder.legal_actions(legal_moves)
+        uniform_prior = 1.0 / len(legal_actions)
 
-        for idx in legal:
-            node.children[idx] = MCTSNode(
+        for idx in legal_actions:
+            node.children[int(idx)] = MCTSNode(
                 prior=float(max(policy[idx], uniform_prior * 0.1)))
         return value

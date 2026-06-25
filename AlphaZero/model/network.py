@@ -1,23 +1,16 @@
-"""AlphaZero 残差网络 — 中国象棋版
+"""AlphaZero Policy-WDL 残差网络 — 中国象棋版
 
-架构 (AlphaZero 论文标准):
+架构:
   输入: (B, 18, 10, 9) — GameState.encode() 输出
-  主体: 20 个 ResBlock（3×3 卷积 + 跳跃连接）
-  Policy Head: Conv1×1 → FC → 走法概率分布
-  Value Head:  Conv1×1 → FC → tanh 评分
-
-CPU 优化:
-  - 默认 filters=128 (原版 256)，参数量降 4 倍
-  - Policy Head 中间层压缩 (32×10×9 → 256 → 2086)
-  - 全卷积 BatchNorm 融合（推理时可用 torch.jit.script）
+  主体: ResBlock × N
+  Policy Head: Conv1×1 → FC → 8100 logits
+  WDL Head: Conv1×1 → FC → 3 logits (win/draw/loss)
 """
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from ..engine.move import ActionEncoder
-
-POLICY_SIZE = ActionEncoder.POLICY_SIZE  # 2086
+from ..engine.constants import POLICY_SIZE, INPUT_CHANNELS, WDL_SIZE
 
 
 class ResBlock(nn.Module):
@@ -38,19 +31,19 @@ class ResBlock(nn.Module):
         return F.relu(out)
 
 
-class AlphaZeroNet(nn.Module):
-    """AlphaZero 风格的双头残差网络。
+class PolicyWDLEncoder(nn.Module):
+    """Policy-WDL 双头残差网络
 
     Args:
-        num_blocks:  残差块数量（原版 20，调试可用 5）
-        num_filters: 卷积层通道数（原版 256，CPU 版默认 128）
+        num_blocks:  残差块数量
+        num_filters: 卷积层通道数
         input_channels: 输入通道数（固定 18）
     """
 
     def __init__(self,
-                 num_blocks: int = 20,
+                 num_blocks: int = 8,
                  num_filters: int = 128,
-                 input_channels: int = 18):
+                 input_channels: int = INPUT_CHANNELS):
         super().__init__()
         self.num_blocks = num_blocks
         self.num_filters = num_filters
@@ -66,19 +59,20 @@ class AlphaZeroNet(nn.Module):
         ])
 
         # ── Policy Head ──
-        # Conv1×1 降维 → FC(256) → FC(POLICY_SIZE)
+        # Conv1×1 降维 → FC → 8100 logits
         self.policy_conv = nn.Conv2d(num_filters, 32, 1, bias=False)
         self.policy_bn = nn.BatchNorm2d(32)
         policy_flat_size = 32 * 10 * 9  # 2880
-        self.policy_fc1 = nn.Linear(policy_flat_size, 256)
-        self.policy_fc2 = nn.Linear(256, POLICY_SIZE)
+        self.policy_fc1 = nn.Linear(policy_flat_size, 512)
+        self.policy_fc2 = nn.Linear(512, POLICY_SIZE)
 
-        # ── Value Head ──
-        # Conv1×1 → FC(128) → FC(1) → tanh
-        self.value_conv = nn.Conv2d(num_filters, 1, 1, bias=False)
-        self.value_bn = nn.BatchNorm2d(1)
-        self.value_fc1 = nn.Linear(10 * 9, 128)
-        self.value_fc2 = nn.Linear(128, 1)
+        # ── WDL Head ──
+        # Conv1×1 → FC → 3 logits
+        self.wdl_conv = nn.Conv2d(num_filters, 32, 1, bias=False)
+        self.wdl_bn = nn.BatchNorm2d(32)
+        wdl_flat_size = 32 * 10 * 9  # 2880
+        self.wdl_fc1 = nn.Linear(wdl_flat_size, 256)
+        self.wdl_fc2 = nn.Linear(256, WDL_SIZE)
 
         # 权重初始化
         self._init_weights()
@@ -104,9 +98,9 @@ class AlphaZeroNet(nn.Module):
             x: (B, 18, 10, 9) float32 — 棋盘编码
 
         Returns:
-            (policy_logits, value):
-              - policy_logits: (B, POLICY_SIZE) — 走法 logits（softmax 在外部）
-              - value:         (B,) float32 — 局面评分 [-1, +1]
+            (policy_logits, wdl_logits):
+              - policy_logits: (B, 8100) — 走法 logits
+              - wdl_logits:    (B, 3)    — win/draw/logits
         """
         # ── 输入卷积 ──
         x = F.relu(self.bn_input(self.conv_input(x)))
@@ -117,118 +111,87 @@ class AlphaZeroNet(nn.Module):
         # ── Policy Head ──
         p = F.relu(self.policy_bn(self.policy_conv(x)))
         p = p.flatten(1)               # (B, 2880)
-        p = F.relu(self.policy_fc1(p))  # (B, 256)
-        p_logits = self.policy_fc2(p)   # (B, 2086) — logits
+        p = F.relu(self.policy_fc1(p))  # (B, 512)
+        p_logits = self.policy_fc2(p)   # (B, 8100)
 
-        # ── Value Head ──
-        v = F.relu(self.value_bn(self.value_conv(x)))
-        v = v.flatten(1)               # (B, 90)
-        v = F.relu(self.value_fc1(v))  # (B, 128)
-        v = torch.tanh(self.value_fc2(v))  # (B, 1) → [-1, +1]
+        # ── WDL Head ──
+        w = F.relu(self.wdl_bn(self.wdl_conv(x)))
+        w = w.flatten(1)               # (B, 2880)
+        w = F.relu(self.wdl_fc1(w))    # (B, 256)
+        w_logits = self.wdl_fc2(w)     # (B, 3)
 
-        return p_logits, v.squeeze(-1)
+        return p_logits, w_logits
 
     def count_parameters(self) -> int:
         """可训练参数总数"""
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
 
     @torch.no_grad()
-    def evaluate_state(self, state_encoding: torch.Tensor) -> tuple:
-        """评估单个局面，返回 (policy_probs, value)。
+    def evaluate_state(self, state_encoding: torch.Tensor,
+                       legal_mask: torch.Tensor = None) -> tuple:
+        """评估单个局面，返回 (policy_probs, wdl_probs, value)。
 
         Args:
             state_encoding: (1, 18, 10, 9) 或 (18, 10, 9)
+            legal_mask: (8100,) bool 可选，合法动作掩码
 
         Returns:
-            policy_probs: (POLICY_SIZE,) numpy float32
-            value: float
+            policy_probs: (8100,) numpy float32
+            wdl_probs: (3,) numpy float32
+            value: float = P(win) - P(loss)
         """
         was_training = self.training
         self.eval()
         if state_encoding.dim() == 3:
             state_encoding = state_encoding.unsqueeze(0)
-        with torch.inference_mode():
-            logits, value = self.forward(state_encoding)
-        probs = F.softmax(logits, dim=1).squeeze(0).cpu().numpy()
+        p_logits, w_logits = self.forward(state_encoding)
+
+        # Policy: 应用合法动作掩码后 softmax (clone 避免 inplace 问题)
+        p_logits = p_logits.squeeze(0).clone()  # (8100,)
+        if legal_mask is not None:
+            p_logits[~legal_mask] = float('-inf')
+        policy_probs = F.softmax(p_logits, dim=0).cpu().numpy()
+
+        # WDL: softmax
+        wdl_probs = F.softmax(w_logits.squeeze(0), dim=0).cpu().numpy()
+
+        # Value = P(win) - P(loss)
+        value = float(wdl_probs[0] - wdl_probs[2])
+
         if was_training:
             self.train()
-        return probs, float(value.item())
+        return policy_probs, wdl_probs, value
 
     @torch.no_grad()
-    def evaluate_batch(self, state_batch: torch.Tensor) -> tuple:
+    def evaluate_batch(self, state_batch: torch.Tensor,
+                       legal_masks: torch.Tensor = None) -> tuple:
         """批量评估局面。
 
         Args:
             state_batch: (B, 18, 10, 9)
+            legal_masks: (B, 8100) bool 可选
 
         Returns:
-            policy_probs: (B, POLICY_SIZE) numpy float32
+            policy_probs: (B, 8100) numpy float32
+            wdl_probs: (B, 3) numpy float32
             values: (B,) numpy float32
         """
         was_training = self.training
         self.eval()
-        with torch.inference_mode():
-            logits, values = self.forward(state_batch)
-        probs = F.softmax(logits, dim=1).cpu().numpy()
+        p_logits, w_logits = self.forward(state_batch)
+
+        # Policy: 应用掩码后 softmax (clone 避免 inplace 问题)
+        p_logits = p_logits.clone()
+        if legal_masks is not None:
+            p_logits[~legal_masks] = float('-inf')
+        policy_probs = F.softmax(p_logits, dim=1).cpu().numpy()
+
+        # WDL: softmax
+        wdl_probs = F.softmax(w_logits, dim=1).cpu().numpy()
+
+        # Value = P(win) - P(loss)
+        values = wdl_probs[:, 0] - wdl_probs[:, 2]
+
         if was_training:
             self.train()
-        return probs, values.cpu().numpy()
-
-    def to_torchscript(self):
-        """导出为 TorchScript（推理加速 20-30%）。"""
-        example = torch.randn(1, 18, 10, 9)
-        return torch.jit.trace(self.eval(), example)
-
-
-def create_model(num_blocks: int = 20, num_filters: int = 128,
-                 checkpoint: str = None) -> AlphaZeroNet:
-    """工厂函数：创建模型并可选加载权重。
-
-    Args:
-        num_blocks:  残差块数量
-        num_filters: 通道数
-        checkpoint:  权重文件路径（可选）
-
-    Returns:
-        AlphaZeroNet 实例
-    """
-    model = AlphaZeroNet(num_blocks=num_blocks, num_filters=num_filters)
-    if checkpoint:
-        state = torch.load(checkpoint, map_location='cpu',
-                          weights_only=True)
-        model.load_state_dict(state['model_state_dict'])
-        print(f"加载模型: {checkpoint} "
-              f"(epoch {state.get('epoch', '?')}, "
-              f"loss {state.get('loss', '?'):.4f})")
-    return model
-
-
-# ── 自检 ──
-if __name__ == "__main__":
-    m = AlphaZeroNet(num_blocks=20, num_filters=128)
-    print(f"参数数量: {m.count_parameters():,}")
-    x = torch.randn(4, 18, 10, 9)
-    p, v = m(x)
-    print(f"输入: {x.shape} → policy: {p.shape}, value: {v.shape}")
-    print(f"Value range: [{v.min().item():.3f}, {v.max().item():.3f}]")
-
-    # Benchmark
-    import time
-    m.eval()
-    # warmup
-    for _ in range(30):
-        with torch.inference_mode():
-            m(torch.randn(1, 18, 10, 9))
-    t0 = time.perf_counter()
-    for _ in range(100):
-        with torch.inference_mode():
-            m(torch.randn(1, 18, 10, 9))
-    t1 = time.perf_counter()
-    print(f"\n单次推理 (inference_mode): {(t1-t0)/100*1000:.1f}ms")
-    # batch=16
-    t0 = time.perf_counter()
-    for _ in range(50):
-        with torch.inference_mode():
-            m(torch.randn(16, 18, 10, 9))
-    t1 = time.perf_counter()
-    print(f"Batch16 推理: {(t1-t0)/50*1000:.1f}ms ({((t1-t0)/50/16*1000):.1f}ms/样本)")
+        return policy_probs, wdl_probs, values

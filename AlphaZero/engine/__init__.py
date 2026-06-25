@@ -1,38 +1,12 @@
-"""AlphaZero 优化规则引擎 — 中国象棋
-
-完全自包含模块，不依赖 backend.chess_rules。
-使用 numpy int8 矩阵 + 原地模拟/撤销，专为 MCTS 优化。
-"""
-from .constants import (ROWS, COLS,
-                         KING, ADVISOR, ELEPHANT, KNIGHT, ROOK, CANNON, PAWN,
-                         RED, BLACK)
-from .fast_chess import (
-    create_initial_board,
-    get_raw_moves,
-    get_valid_moves,
-    is_valid_move,
-    make_move,
-    undo_move,
-    is_in_check,
-    check_game_result,
-    has_any_valid_move,
+"""中国象棋 AlphaZero 引擎模块"""
+from .constants import (
+    ROWS, COLS, BOARD_SIZE, POLICY_SIZE,
+    INPUT_CHANNELS, WDL_SIZE, MAX_GAME_PLY, REPETITION_LIMIT,
+    EMPTY, KING, ADVISOR, ELEPHANT, KNIGHT, ROOK, CANNON, PAWN,
+    RED, BLACK, WDL_WIN, WDL_DRAW, WDL_LOSS,
+    PIECE_VALUES, INIT_LAYOUT
 )
 from .move import Move, ActionEncoder
-from .state import GameState
-
-__all__ = [
-    "ROWS", "COLS",
-    "KING", "ADVISOR", "ELEPHANT", "KNIGHT", "ROOK", "CANNON", "PAWN",
-    "RED", "BLACK",
-    "create_initial_board",
-    "get_raw_moves",
-    "get_valid_moves",
-    "is_valid_move",
-    "make_move",
-    "undo_move",
-    "is_in_check",
-    "check_game_result",
-    "has_any_valid_move",
-    "Move", "ActionEncoder",
-    "GameState",
-]
+from .state import GameState, GameResult
+from .repetition import position_key, update_repetition, is_repetition_draw
+from .fast_chess import create_initial_board, get_valid_moves, is_in_check

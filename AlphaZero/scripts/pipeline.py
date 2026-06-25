@@ -1,16 +1,17 @@
-"""AlphaZero 训练管道 — 两阶段冷启动 -> 自举循环。
-
-Phase 1 (warmup): MCTS + HeuristicEvaluator -> 数据 -> 训练网络 value
-Phase 2 (main):   MCTS + NeuralEvaluator  -> 数据 -> 训练 -> 循环
+"""AlphaZero 训练管道 — 全并行 + 实时监控
 
 用法:
-    python -m AlphaZero.scripts.pipeline --warmup 10 --iterations 50
+    python -m AlphaZero.scripts.pipeline --config config/default.yaml
+    python -m AlphaZero.scripts.pipeline --config config/default.yaml --workers 16
 """
 import sys
+import os
 import time
 import argparse
 from pathlib import Path
 from datetime import datetime
+import multiprocessing as mp
+from multiprocessing import Process, Queue, Event
 
 import numpy as np
 import torch
@@ -18,184 +19,309 @@ import torch
 _project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(_project_root))
 
-from AlphaZero.model import AlphaZeroNet, NeuralEvaluator
-from AlphaZero.search import MCTS, HeuristicEvaluator
+from AlphaZero.model import PolicyWDLEncoder, NeuralEvaluator
+from AlphaZero.search import MCTS
 from AlphaZero.train import AlphaZeroConfig, ReplayBuffer, Trainer
-from AlphaZero.train.self_play import SelfPlayGame
+from AlphaZero.train.arena import Arena
+from AlphaZero.train.inference_server import InferenceServer
+from AlphaZero.train.self_play_worker import self_play_worker_fn
+from AlphaZero.train.monitor import monitor
+from AlphaZero.engine import GameState, RED, BLACK
 
 
-def run_iteration(model, config, replay, iteration, phase='neural'):
-    """一次迭代: 自对弈 + 训练。
+def parallel_self_play(config: AlphaZeroConfig,
+                       model_path: str,
+                       num_workers: int,
+                       games_per_worker: int,
+                       device: str = 'cuda',
+                       verbose: bool = True) -> ReplayBuffer:
+    """多进程并行自对弈"""
+    server = InferenceServer(
+        model_path=model_path,
+        device=device,
+        batch_size=config.inference_batch_size,
+        max_wait_ms=config.inference_wait_ms,
+        num_workers=num_workers,
+    )
+    server_pid = server.start()
+    if verbose:
+        print(f"  InferenceServer 已启动 (PID={server_pid}, device={device})")
 
-    Args:
-        model:  AlphaZeroNet
-        config: AlphaZeroConfig
-        replay: ReplayBuffer
-        iteration: int
-        phase: 'heuristic' | 'neural'
-    """
-    use_heuristic = (phase == 'heuristic')
-    tag = 'HEURISTIC' if use_heuristic else 'NEURAL'
+    result_queue = Queue(maxsize=200000)
+    stop_event = Event()
+    processes = []
 
-    # -- Self-play --
-    print(f"\n{'='*60}")
-    print(f"Iter {iteration} [{tag}] {config.games_per_iteration} games x {config.num_simulations} sims")
-    print(f"{'='*60}")
+    for i in range(num_workers):
+        p = Process(
+            target=self_play_worker_fn,
+            args=(i, config, games_per_worker,
+                  server.request_queue, server.response_queues[i],
+                  result_queue, stop_event),
+            daemon=True,
+        )
+        p.start()
+        processes.append(p)
 
-    if use_heuristic:
-        evaluator = HeuristicEvaluator(seed=42 + iteration)
-    else:
-        evaluator = NeuralEvaluator(model)
+    if verbose:
+        print(f"  {num_workers} 个 SelfPlayWorker 已启动")
 
-    mcts = MCTS(evaluator=evaluator, num_simulations=config.num_simulations,
-                c_puct=config.c_puct, dirichlet_alpha=config.dirichlet_alpha,
-                dirichlet_epsilon=config.dirichlet_epsilon)
+    replay = ReplayBuffer(max_size=config.replay_buffer_size)
+    workers_done = 0
+    total_stats = {'red': 0, 'black': 0, 'draw': 0, 'moves': 0, 'games': 0}
+    t_start = time.perf_counter()
 
-    red = black = draw = 0
-    total_moves = new_samples = 0
-    t0 = time.perf_counter()
+    while workers_done < num_workers:
+        try:
+            item = result_queue.get(timeout=300)  # 5分钟超时
+        except:
+            # 检查worker是否还活着
+            alive = sum(1 for p in processes if p.is_alive())
+            if alive == 0 and workers_done < num_workers:
+                print(f"  ⚠ 所有Worker已退出，但只有 {workers_done}/{num_workers} 报告完成")
+                break
+            continue
 
-    for i in range(config.games_per_iteration):
-        game = SelfPlayGame(mcts, config, game_id=iteration * 1000 + i)
-        while not game.is_terminal():
-            game.step()
-        r = game.result()
-        if r > 0.5: red += 1
-        elif r < -0.5: black += 1
-        else: draw += 1
-        total_moves += game.state.move_count
-        for s, p, v in game.get_training_data():
-            replay.add(s, p, v)
-        new_samples += game.state.move_count
+        if (isinstance(item, tuple) and len(item) == 3
+                and isinstance(item[0], str) and item[0] == 'DONE'):
+            _, stats, _ = item
+            workers_done += 1
+            for k in ['red', 'black', 'draw', 'moves', 'games']:
+                total_stats[k] += stats[k]
+            if verbose:
+                elapsed = time.perf_counter() - t_start
+                print(f"  Worker {stats['worker_id']} 完成: "
+                      f"{stats['games']}局 {stats['moves']}步 "
+                      f"({stats['elapsed']:.0f}s) "
+                      f"[{workers_done}/{num_workers}]")
+        else:
+            state_enc, policy, wdl = item
+            replay.add(state_enc, policy, wdl)
 
-        if (i + 1) % max(1, config.games_per_iteration // 5) == 0:
-            t = time.perf_counter() - t0
-            term = red + black
-            print(f"  G{i+1:3d}/{config.games_per_iteration}: "
-                  f"R={red} B={black} D={draw} ({term}/{i+1} term) [{t:.0f}s]")
+        # 更新监控
+        monitor.update(
+            phase='self_play',
+            workers=num_workers,
+            games_done=total_stats['games'],
+            games_total=games_per_worker * num_workers,
+            samples=len(replay),
+        )
 
-    tsp = time.perf_counter() - t0
-    tr = (red + black) / config.games_per_iteration * 100
-    print(f"  Done: {tsp:.0f}s ({tsp/config.games_per_iteration:.1f}s/game) | "
-          f"R={red} B={black} D={draw} term={tr:.0f}% | +{new_samples} samples")
+    stop_event.set()
+    server.stop()
+    for p in processes:
+        p.join(timeout=5)
+        if p.is_alive():
+            p.terminate()
 
-    # -- Train --
-    print(f"  Train {config.epochs_per_iteration} epochs...")
-    trainer = Trainer(config)
-    trainer.model.load_state_dict(model.state_dict())
-    stats = trainer.train(replay, epochs=config.epochs_per_iteration)
-    model.load_state_dict(trainer.model.state_dict())
+    elapsed = time.perf_counter() - t_start
+    if verbose:
+        total_games = total_stats['games']
+        total_moves = total_stats['moves']
+        print(f"  自对弈完成: {total_games}局 {total_moves}步 "
+              f"{elapsed:.0f}s ({elapsed/max(total_games,1):.1f}s/局)")
+        print(f"  R={total_stats['red']} B={total_stats['black']} "
+              f"D={total_stats['draw']} | {len(replay)} 样本")
 
-    return {
-        'iteration': iteration, 'phase': tag,
-        'red': red, 'black': black, 'draw': draw,
-        'term_rate': tr, 'total_moves': total_moves,
-        'new_samples': new_samples, 'buffer_size': len(replay),
-        'elapsed_sp': tsp, **stats,
-    }
+    return replay
 
 
-def pipeline(config, max_iterations=50, warmup_iterations=10,
-             checkpoint=None, resume=None, output_dir="AlphaZero/checkpoints"):
+def pipeline(config: AlphaZeroConfig,
+             max_iterations: int = None,
+             checkpoint: str = None,
+             resume: str = None,
+             output_dir: str = None,
+             enable_monitor: bool = True):
+    """完整训练管道（全并行）"""
+    # 从config读取max_iterations，或使用默认值100
+    if max_iterations is None:
+        # 尝试从config获取（需要在config中添加这个字段）
+        max_iterations = getattr(config, 'max_iterations', 100)
+    output_dir = output_dir or config.checkpoint_dir
+    num_workers = config.num_workers or os.cpu_count() or 4
+
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-    model = AlphaZeroNet(num_blocks=config.num_blocks,
-                          num_filters=config.num_filters)
+    model = PolicyWDLEncoder(
+        num_blocks=config.num_blocks,
+        num_filters=config.num_filters,
+    ).to(device)
     start = 0
 
     if resume:
-        ck = torch.load(resume, map_location='cpu', weights_only=False)
+        ck = torch.load(resume, map_location=device, weights_only=False)
         model.load_state_dict(ck['model_state_dict'])
         start = ck.get('iteration', 0) + 1
-        print(f"Resumed: {resume} (iteration {ck.get('iteration','?')})")
+        print(f"恢复训练: {resume} (iteration {start})")
     elif checkpoint:
-        ck = torch.load(checkpoint, map_location='cpu', weights_only=False)
+        ck = torch.load(checkpoint, map_location=device, weights_only=False)
         model.load_state_dict(ck['model_state_dict'])
-        print(f"Loaded: {checkpoint}")
+        print(f"加载 checkpoint: {checkpoint}")
 
     replay = ReplayBuffer(max_size=config.replay_buffer_size)
-    history = []
+    trainer = Trainer(config, device)
+    if resume or checkpoint:
+        trainer.model.load_state_dict(model.state_dict())
 
-    print(f"\nModel: {model.count_parameters():,} params")
-    print(f"Warmup: {warmup_iterations} iters (heuristic), "
-          f"Main: {max_iterations - warmup_iterations} iters (neural)")
-    print(f"Total:  {config.games_per_iteration} games x {config.num_simulations} sims x {max_iterations} iters")
+    arena = Arena(config, device)
+    best_model_path = str(out / "best.pt")
+
+    if not Path(best_model_path).exists():
+        torch.save({'model_state_dict': model.state_dict(),
+                    'config': config.to_dict()}, best_model_path)
+
+    # 启动监控
+    if enable_monitor:
+        monitor.interval = config.monitor_interval
+        monitor.update(
+            iteration=start,
+            max_iterations=start + max_iterations,
+            workers=num_workers,
+            promoted=0,
+        )
+        monitor.start()
+
+    print(f"\n{'='*60}")
+    print(f"AlphaZero 并行训练管道")
+    print(f"{'='*60}")
+    print(f"模型: {model.count_parameters():,} 参数")
+    print(f"设备: {device}")
+    print(f"Workers: {num_workers}")
+    print(f"Iterations: {max_iterations}")
+    print(f"每轮: {config.games_per_iteration} 局自对弈 + {config.epochs_per_iteration} epochs")
+    print(f"Arena: {config.arena_games} 局, 晋升阈值 {config.promotion_score_rate}")
+    print(f"MCTS: {config.num_simulations} 模拟, c_puct={config.c_puct}")
+    print(f"训练: batch={config.batch_size}, lr={config.learning_rate}")
+    print(f"监控: {'开启' if enable_monitor else '关闭'}")
+    print(f"{'='*60}\n")
 
     total_start = time.perf_counter()
+    history = []
+    total_promoted = 0
 
     for it in range(start, start + max_iterations):
         ts = datetime.now().strftime("%H:%M:%S")
-        phase = 'heuristic' if it < warmup_iterations else 'neural'
+        model_path = str(out / "latest.pt")
 
-        print(f"\n{'#'*60}")
-        print(f"# Iteration {it+1}/{start+max_iterations} [{phase.upper()}] [{ts}]")
-        print(f"{'#'*60}")
+        # 保存当前模型供 self-play 使用
+        torch.save({'model_state_dict': model.state_dict(),
+                    'config': config.to_dict()}, model_path)
 
-        st = run_iteration(model, config, replay, it, phase=phase)
-        st['timestamp'] = ts
-        history.append(st)
+        print(f"\n[{ts}] Iteration {it+1}/{start+max_iterations}")
+        print(f"{'─'*40}")
 
-        # Save checkpoint
-        ckpt_path = out / f"iter{it:03d}.pt"
+        # 保存旧模型
+        model_old_path = str(out / f"iter{it:03d}_old.pt")
+        torch.save({'model_state_dict': model.state_dict()}, model_old_path)
+
+        # 更新监控
+        monitor.update(iteration=it+1, phase='self_play')
+
+        # 并行自对弈
+        games_per_worker = max(1, config.games_per_iteration // num_workers)
+        replay = parallel_self_play(
+            config=config,
+            model_path=model_path,
+            num_workers=num_workers,
+            games_per_worker=games_per_worker,
+            device=device,
+        )
+
+        # 更新监控
+        monitor.update(phase='training', loss=None)
+
+        # 训练
+        stats = trainer.train(replay, epochs=config.epochs_per_iteration)
+        model.load_state_dict(trainer.model.state_dict())
+
+        # 更新监控
+        monitor.update(loss=stats.get('avg_loss', 0))
+
+        # 保存候选模型
+        candidate_path = str(out / f"iter{it:03d}.pt")
         torch.save({
             'model_state_dict': model.state_dict(),
             'iteration': it, 'config': config.to_dict(),
-            'stats': st, 'history': history,
-        }, str(ckpt_path))
+            'stats': stats,
+        }, candidate_path)
 
-        # Latest
-        torch.save({
-            'model_state_dict': model.state_dict(),
-            'iteration': it, 'config': config.to_dict(),
-            'stats': st,
-        }, str(out / "latest.pt"))
+        # Arena 评估
+        print(f"  Arena: {config.arena_games} 局 vs 旧模型...")
+        monitor.update(phase='arena', arena_w=0, arena_l=0, arena_d=0)
 
-        # Trend
-        if len(history) >= 2:
-            prev = history[-2]['term_rate']
-            curr = st['term_rate']
-            arrow = 'UP' if curr > prev else ('DOWN' if curr < prev else 'FLAT')
-            print(f"  Term: {prev:.0f}% -> {curr:.0f}% [{arrow}]")
-            print(f"  Loss: {history[-2]['avg_loss']:.4f} -> {st['avg_loss']:.4f}")
+        arena_result = arena.evaluate(candidate_path, model_old_path)
+        print(f"  结果: W={arena_result['wins']} L={arena_result['losses']} "
+              f"D={arena_result['draws']} score={arena_result['score_rate']:.1%}")
 
-        # Phase transition
-        if it == warmup_iterations - 1 and warmup_iterations > 0:
-            print(f"\n  >>> Switching from HEURISTIC to NEURAL evaluator <<<")
+        # 更新监控
+        monitor.update(
+            arena_w=arena_result['wins'],
+            arena_l=arena_result['losses'],
+            arena_d=arena_result['draws'],
+        )
+
+        if arena_result['should_promote']:
+            print(f"  ✓ 晋升")
+            total_promoted += 1
+            torch.save({'model_state_dict': model.state_dict(),
+                        'iteration': it, 'config': config.to_dict()},
+                       best_model_path)
+        else:
+            print(f"  ✗ 回滚")
+            ck = torch.load(model_old_path, map_location=device)
+            model.load_state_dict(ck['model_state_dict'])
+            trainer.model.load_state_dict(ck['model_state_dict'])
+
+        # 更新监控
+        monitor.update(promoted=total_promoted)
+
+        Path(model_old_path).unlink(missing_ok=True)
+
+        history.append({
+            'iteration': it, 'buffer_size': len(replay),
+            'arena': arena_result, **stats
+        })
+
+        torch.save({'model_state_dict': model.state_dict(),
+                    'iteration': it, 'config': config.to_dict()},
+                   str(out / "latest.pt"))
+
+    # 停止监控
+    monitor.stop()
 
     total_elapsed = time.perf_counter() - total_start
     print(f"\n{'='*60}")
-    print(f"PIPELINE DONE: {len(history)} iterations, {total_elapsed/3600:.1f}h")
-    if history:
-        print(f"  Final term rate: {history[-1]['term_rate']:.0f}%")
-        print(f"  Final loss:      {history[-1]['avg_loss']:.4f}")
-    print(f"  Checkpoint:      {out}/latest.pt")
+    print(f"训练完成: {len(history)} 轮, {total_elapsed/3600:.1f} 小时")
+    print(f"晋升: {total_promoted}/{len(history)}")
+    print(f"最佳模型: {best_model_path}")
+    print(f"{'='*60}")
 
 
 if __name__ == "__main__":
-    p = argparse.ArgumentParser(description="AlphaZero training pipeline")
-    p.add_argument("--checkpoint", type=str, default=None, help="Cold-start checkpoint")
-    p.add_argument("--resume", type=str, default=None, help="Resume checkpoint")
-    p.add_argument("--output", type=str, default="AlphaZero/checkpoints")
-    p.add_argument("--iterations", type=int, default=50)
-    p.add_argument("--warmup", type=int, default=10, help="Heuristic warmup iterations")
-    p.add_argument("--games", type=int, default=20)
-    p.add_argument("--sims", type=int, default=50)
-    p.add_argument("--epochs", type=int, default=5)
-    p.add_argument("--batch", type=int, default=128)
-    p.add_argument("--blocks", type=int, default=8)
-    p.add_argument("--filters", type=int, default=96)
-    p.add_argument("--buffer", type=int, default=100000)
-    p.add_argument("--max-moves", type=int, default=80)
+    mp.set_start_method('spawn', force=True)
+
+    p = argparse.ArgumentParser(description="AlphaZero 并行训练管道")
+    p.add_argument("--config", type=str, default="config/default.yaml",
+                   help="YAML 配置文件路径")
+    p.add_argument("--checkpoint", type=str, default=None)
+    p.add_argument("--resume", type=str, default=None)
+    p.add_argument("--output", type=str, default=None)
+    p.add_argument("--iterations", type=int, default=None)
+    p.add_argument("--workers", type=int, default=None, help="覆盖配置文件中的 workers")
+    p.add_argument("--no-monitor", action="store_true", help="禁用实时监控")
     args = p.parse_args()
 
-    config = AlphaZeroConfig(
-        num_blocks=args.blocks, num_filters=args.filters,
-        num_simulations=args.sims, games_per_iteration=args.games,
-        epochs_per_iteration=args.epochs, batch_size=args.batch,
-        replay_buffer_size=args.buffer, max_game_length=args.max_moves,
-    )
+    # 从 YAML 加载配置
+    config = AlphaZeroConfig.from_yaml(args.config)
+
+    # 命令行覆盖
+    if args.workers is not None:
+        config.num_workers = args.workers
+
+    print(f"配置文件: {args.config}")
 
     pipeline(config=config, max_iterations=args.iterations,
-             warmup_iterations=args.warmup, checkpoint=args.checkpoint,
-             resume=args.resume, output_dir=args.output)
+             checkpoint=args.checkpoint, resume=args.resume,
+             output_dir=args.output,
+             enable_monitor=not args.no_monitor)

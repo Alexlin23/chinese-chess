@@ -12,7 +12,6 @@
     <div class="game-info">
       <span id="turn-indicator">当前回合：<span id="current-turn">红方</span></span>
       <span id="status-message"></span>
-      <span id="mode-indicator" style="font-size:12px; color:#999;">连接中...</span>
     </div>
     <div class="captured-area" id="captured-black">
       <span class="captured-label">黑方被吃：</span>
@@ -28,24 +27,8 @@
       <button id="btn-restart">重新开始</button>
       <button id="btn-undo">悔棋</button>
       <button id="btn-ai" style="background:#c0392b;color:#fff;">AI 走棋</button>
-    </div>
-
-    <!-- 自我对弈观战 -->
-    <div class="self-play-panel" id="self-play-panel">
-      <h3>🤖 神经网络自我对弈</h3>
-      <div class="self-play-controls">
-        <button id="btn-self-play-start">▶ 开始观战</button>
-        <button id="btn-self-play-stop" disabled>⏹ 停止</button>
-        <label class="speed-label">
-          速度: <input type="range" id="self-play-speed" min="1" max="10" value="5" step="1">
-          <span id="speed-display">5</span>
-        </label>
-      </div>
-      <div class="self-play-stats">
-        <span id="sp-status">就绪</span>
-        <span id="sp-step">步数: 0</span>
-        <span id="sp-winner" style="font-weight:bold;"></span>
-      </div>
+      <button id="btn-ai-vs-ai" style="background:#7b1fa2;color:#fff;">AI 对战</button>
+      <button id="btn-ai-vs-ai-stop" style="background:#555;color:#fff;display:none;">停止对战</button>
     </div>
   </div>
   <script src="/static/chess.js"></script>

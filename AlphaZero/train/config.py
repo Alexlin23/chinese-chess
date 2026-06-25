@@ -1,98 +1,130 @@
-"""AlphaZero 训练超参数 — 针对 CPU 优化"""
-from dataclasses import dataclass
+"""AlphaZero 训练超参数 — 支持 YAML 配置文件"""
+import os
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Optional
 
 
 @dataclass
 class AlphaZeroConfig:
-    """AlphaZero 训练配置。
-
-    所有参数均可覆盖，适合逐步调优。
-    """
+    """AlphaZero 训练配置"""
 
     # ── 模型架构 ──
-    num_blocks: int = 20          # 残差块数量（AlphaZero 原版 20）
-    num_filters: int = 128        # 卷积通道数（原版 256，CPU 版降为 128）
+    num_blocks: int = 20
+    num_filters: int = 256
+    input_channels: int = 18
+    policy_size: int = 8100
+    wdl_size: int = 3
 
     # ── MCTS 搜索 ──
-    num_simulations: int = 200    # 每次搜索的模拟次数（GPU 用 800，CPU 用 200）
-    c_puct: float = 1.5           # PUCT 探索系数
-    dirichlet_alpha: float = 0.3  # Dirichlet 噪声浓度（中国象棋合法走法多，略低）
-    dirichlet_epsilon: float = 0.25  # 噪声混合比例
+    num_simulations: int = 800
+    c_puct: float = 1.5
+    dirichlet_alpha: float = 0.3
+    dirichlet_epsilon: float = 0.25
+    mcts_batch_size: int = 256
 
     # ── 自我对弈 ──
-    temperature_threshold: int = 30   # 前 N 步用 τ=1（探索），之后 τ→0（贪心）
-    games_per_iteration: int = 50     # 每轮迭代生成对局数
-    max_game_length: int = 200        # 单局最大步数（防止无限循环）
+    temperature_ply: int = 30
+    games_per_iteration: int = 25000
+    max_game_ply: int = 512
+    repetition_limit: int = 3
 
     # ── 训练 ──
-    batch_size: int = 128             # 训练批次大小（CPU 优化）
-    learning_rate: float = 0.001      # 初始学习率（Adam）
-    lr_decay_step: int = 5            # 每 N 轮迭代学习率衰减
-    lr_decay_rate: float = 0.5        # 衰减倍率
-    weight_decay: float = 1e-4        # L2 正则化系数
-    epochs_per_iteration: int = 10    # 每轮训练 epoch 数
-    replay_buffer_size: int = 100_000  # 经验回放缓冲区最大容量
+    batch_size: int = 4096
+    learning_rate: float = 0.2
+    lr_momentum: float = 0.9
+    lr_decay_step: int = 100000
+    lr_decay_rate: float = 0.1
+    weight_decay: float = 1e-4
+    epochs_per_iteration: int = 10
+    replay_buffer_size: int = 1_000_000
+    samples_per_epoch: int = 100000
+
+    # ── Arena ──
+    arena_games: int = 400
+    promotion_score_rate: float = 0.55
+
+    # ── 并行 ──
+    num_workers: Optional[int] = None  # None = os.cpu_count()
+    inference_batch_size: int = 256
+    inference_wait_ms: float = 10.0
 
     # ── 系统 ──
-    num_workers: int = 4              # DataLoader 线程数
     checkpoint_dir: str = "AlphaZero/checkpoints"
-    data_dir: str = "AlphaZero/data"  # self-play 数据存放
-    eval_games: int = 10              # 评估新模型时对弈局数
-    win_rate_threshold: float = 0.55  # 替换旧模型的胜率阈值
+    log_interval: int = 100
+    save_interval: int = 1
+    monitor_interval: float = 5.0
 
-    # ── 日志 ──
-    log_interval: int = 10            # 训练每 N batch 打印一次
-    save_interval: int = 5            # 每 N 轮保存一次 checkpoint
+    # ── 训练循环 ──
+    max_iterations: int = 100
 
     @property
     def checkpoint_path(self) -> Path:
         return Path(self.checkpoint_dir)
 
-    @property
-    def data_path(self) -> Path:
-        return Path(self.data_dir)
-
     def to_dict(self) -> dict:
-        """转为普通 dict，便于序列化到 checkpoint。"""
         return {k: v for k, v in self.__dict__.items()
                 if not k.startswith('_')}
 
+    @classmethod
+    def from_yaml(cls, path: str) -> 'AlphaZeroConfig':
+        """从 YAML 文件加载配置"""
+        import yaml
+        with open(path, 'r') as f:
+            data = yaml.safe_load(f)
 
-# ── 预设配置 ──
+        config = cls()
 
-def quick_config() -> AlphaZeroConfig:
-    """快速测试配置（用于验证管道通畅）。"""
-    return AlphaZeroConfig(
-        num_blocks=5,
-        num_filters=64,
-        num_simulations=50,
-        games_per_iteration=5,
-        epochs_per_iteration=2,
-        batch_size=64,
-        replay_buffer_size=10_000,
-    )
+        # 模型
+        if 'model' in data:
+            config.num_blocks = data['model'].get('blocks', config.num_blocks)
+            config.num_filters = data['model'].get('filters', config.num_filters)
+            config.input_channels = data['model'].get('input_channels', config.input_channels)
 
+        # MCTS
+        if 'mcts' in data:
+            config.num_simulations = data['mcts'].get('simulations', config.num_simulations)
+            config.c_puct = data['mcts'].get('c_puct', config.c_puct)
+            config.dirichlet_alpha = data['mcts'].get('dirichlet_alpha', config.dirichlet_alpha)
+            config.dirichlet_epsilon = data['mcts'].get('dirichlet_epsilon', config.dirichlet_epsilon)
+            config.mcts_batch_size = data['mcts'].get('batch_size', config.mcts_batch_size)
 
-def cpu_config() -> AlphaZeroConfig:
-    """CPU 优化配置（完整训练用）。"""
-    return AlphaZeroConfig(
-        num_blocks=20,
-        num_filters=128,
-        num_simulations=200,
-        games_per_iteration=50,
-        epochs_per_iteration=10,
-        batch_size=128,
-    )
+        # 自我对弈
+        if 'self_play' in data:
+            config.games_per_iteration = data['self_play'].get('games', config.games_per_iteration)
+            config.max_game_ply = data['self_play'].get('max_ply', config.max_game_ply)
+            config.temperature_ply = data['self_play'].get('temperature_ply', config.temperature_ply)
 
+        # 训练
+        if 'training' in data:
+            config.batch_size = data['training'].get('batch_size', config.batch_size)
+            config.learning_rate = data['training'].get('lr', config.learning_rate)
+            config.lr_momentum = data['training'].get('lr_momentum', config.lr_momentum)
+            config.weight_decay = data['training'].get('weight_decay', config.weight_decay)
+            config.epochs_per_iteration = data['training'].get('epochs', config.epochs_per_iteration)
+            config.replay_buffer_size = data['training'].get('replay_buffer', config.replay_buffer_size)
+            config.samples_per_epoch = data['training'].get('samples_per_epoch', config.samples_per_epoch)
 
-def full_config() -> AlphaZeroConfig:
-    """完整配置（需要 GPU）。"""
-    return AlphaZeroConfig(
-        num_blocks=20,
-        num_filters=256,
-        num_simulations=800,
-        games_per_iteration=100,
-        epochs_per_iteration=10,
-        batch_size=512,
-    )
+        # Arena
+        if 'arena' in data:
+            config.arena_games = data['arena'].get('games', config.arena_games)
+            config.promotion_score_rate = data['arena'].get('threshold', config.promotion_score_rate)
+
+        # 并行
+        if 'parallel' in data:
+            config.num_workers = data['parallel'].get('workers', config.num_workers)
+            config.inference_batch_size = data['parallel'].get('inference_batch', config.inference_batch_size)
+            config.inference_wait_ms = data['parallel'].get('inference_wait_ms', config.inference_wait_ms)
+
+        # 系统
+        if 'system' in data:
+            config.checkpoint_dir = data['system'].get('checkpoint_dir', config.checkpoint_dir)
+            config.log_interval = data['system'].get('log_interval', config.log_interval)
+            config.save_interval = data['system'].get('save_interval', config.save_interval)
+            config.monitor_interval = data['system'].get('monitor_interval', config.monitor_interval)
+
+        # 训练循环
+        if 'pipeline' in data:
+            config.max_iterations = data['pipeline'].get('max_iterations', config.max_iterations)
+
+        return config

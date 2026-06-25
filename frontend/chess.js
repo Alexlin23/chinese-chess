@@ -19,7 +19,6 @@ let turn = "r";               // "r" 红方, "b" 黑方
 let gameOver = false;
 let history = [];
 let gameSessionId = null;
-let useBackend = true;        // 是否使用后端 API
 let capturedRed = [];         // 被吃的红方棋子
 let capturedBlack = [];       // 被吃的黑方棋子
 let syncedStepCount = 0;      // 已同步的步数，用于轮询检测外部变更
@@ -91,16 +90,6 @@ function initGame() {
   updateTurn();
   renderCaptured();
 
-  const modeEl = document.getElementById("mode-indicator");
-  if (!useBackend) {
-    initBoard();
-    drawBoard();
-    renderPieces();
-    modeEl.textContent = "模式：本地规则";
-    modeEl.style.color = "#ff9800";
-    return;
-  }
-
   // 尝试恢复上次对局
   const savedId = localStorage.getItem("chess_game_id");
   if (savedId) {
@@ -164,16 +153,10 @@ function initGame() {
         renderPieces();
         syncedStepCount = 0;
         startPolling();
-        modeEl.textContent = "模式：后端API（对局 #" + gameSessionId + "）";
-        modeEl.style.color = "#4caf50";
       })
       .catch(() => {
-        useBackend = false;
-        initBoard();
-        drawBoard();
-        renderPieces();
-        modeEl.textContent = "模式：本地规则（后端未连接）";
-        modeEl.style.color = "#ff9800";
+        console.error("创建对局失败，请检查后端连接");
+        msgEl.textContent = "创建对局失败，请检查后端连接";
       });
   }
 }
@@ -368,21 +351,18 @@ canvas.addEventListener("click", e => {
 //  获取可走位置
 // ============================================================
 async function fetchValidMoves(row, col) {
-  if (useBackend) {
-    try {
-      const resp = await fetch("/api/valid-moves", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ board, row, col, turn }),
-      });
-      const data = await resp.json();
-      validMoves = data.moves || [];
-    } catch (err) {
-      console.warn("后端获取走法失败，使用本地规则", err);
-      validMoves = getValidMovesLocal(row, col);
-    }
-  } else {
-    validMoves = getValidMovesLocal(row, col);
+  try {
+    const resp = await fetch("/api/valid-moves", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ board, row, col, turn }),
+    });
+    const data = await resp.json();
+    validMoves = data.moves || [];
+  } catch (err) {
+    console.error("后端获取走法失败", err);
+    validMoves = [];
+    msgEl.textContent = "获取走法失败，请检查后端连接";
   }
   renderPieces();
 }
@@ -393,89 +373,59 @@ async function fetchValidMoves(row, col) {
 async function doMove(fromR, fromC, toR, toC) {
   if (gameOver) return;
 
-  if (useBackend) {
-    try {
-      const resp = await fetch("/api/move", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          board,
-          from_pos: { row: fromR, col: fromC },
-          to_pos: { row: toR, col: toC },
-          turn,
-          game_id: gameSessionId,
-        }),
-      });
-      const data = await resp.json();
-      if (!data.valid) {
-        msgEl.textContent = "走法不合法";
-        return;
-      }
-      // 保存历史
-      const captured = board[toR][toC];
-      history.push({
-        from: { row: fromR, col: fromC },
-        to: { row: toR, col: toC },
-        piece: board[fromR][fromC],
-        captured,
-      });
-      // 每步走棋后重置消息，只反映当前步的结果
-      msgEl.textContent = "";
-      if (captured) {
-        if (captured.color === "r") capturedRed.push(captured);
-        else capturedBlack.push(captured);
-        msgEl.textContent = `吃子：${captured.type}`;
-        renderCaptured();
-      }
-      if (data.check) {
-        msgEl.textContent = msgEl.textContent ? "吃子并将军！" : "将军！";
-      }
-      // 用后端返回的新棋盘
-      board = data.new_board;
-      turn = turn === "r" ? "b" : "r";
-      selected = null;
-      validMoves = [];
-      syncedStepCount = history.length;
-      updateTurn();
-      drawBoard();
-      renderPieces();
-      if (data.game_over) {
-        gameOver = true;
-        msgEl.textContent = data.game_over === "red_win" ? "红方胜！" : "黑方胜！";
-      }
+  try {
+    const resp = await fetch("/api/move", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        board,
+        from_pos: { row: fromR, col: fromC },
+        to_pos: { row: toR, col: toC },
+        turn,
+        game_id: gameSessionId,
+      }),
+    });
+    const data = await resp.json();
+    if (!data.valid) {
+      msgEl.textContent = "走法不合法";
       return;
-    } catch (err) {
-      console.warn("后端走棋失败，使用本地规则", err);
     }
+    // 保存历史
+    const captured = board[toR][toC];
+    history.push({
+      from: { row: fromR, col: fromC },
+      to: { row: toR, col: toC },
+      piece: board[fromR][fromC],
+      captured,
+    });
+    // 每步走棋后重置消息，只反映当前步的结果
+    msgEl.textContent = "";
+    if (captured) {
+      if (captured.color === "r") capturedRed.push(captured);
+      else capturedBlack.push(captured);
+      msgEl.textContent = `吃子：${captured.type}`;
+      renderCaptured();
+    }
+    if (data.check) {
+      msgEl.textContent = msgEl.textContent ? "吃子并将军！" : "将军！";
+    }
+    // 用后端返回的新棋盘
+    board = data.new_board;
+    turn = turn === "r" ? "b" : "r";
+    selected = null;
+    validMoves = [];
+    syncedStepCount = history.length;
+    updateTurn();
+    drawBoard();
+    renderPieces();
+    if (data.game_over) {
+      gameOver = true;
+      msgEl.textContent = data.game_over === "red_win" ? "红方胜！" : "黑方胜！";
+    }
+  } catch (err) {
+    console.error("后端走棋失败", err);
+    msgEl.textContent = "走棋失败，请检查后端连接";
   }
-
-  // 本地兜底
-  const capturedLocal = board[toR][toC];
-  history.push({
-    from: { row: fromR, col: fromC },
-    to: { row: toR, col: toC },
-    piece: board[fromR][fromC],
-    captured: capturedLocal,
-  });
-  msgEl.textContent = "";
-  if (capturedLocal) {
-    if (capturedLocal.color === "r") capturedRed.push(capturedLocal);
-    else capturedBlack.push(capturedLocal);
-    msgEl.textContent = `吃子：${capturedLocal.type}`;
-    renderCaptured();
-  }
-  board[toR][toC] = board[fromR][fromC];
-  board[fromR][fromC] = null;
-  turn = turn === "r" ? "b" : "r";
-  // 本地将军检测
-  if (isInCheckLocal(board, turn)) {
-    msgEl.textContent = msgEl.textContent ? msgEl.textContent + " 将军！" : "将军！";
-  }
-  selected = null;
-  validMoves = [];
-  updateTurn();
-  drawBoard();
-  renderPieces();
 }
 
 // ============================================================
@@ -484,54 +434,35 @@ async function doMove(fromR, fromC, toR, toC) {
 document.getElementById("btn-undo").addEventListener("click", async () => {
   if (history.length === 0) return;
 
-  if (useBackend && gameSessionId) {
-    try {
-      const resp = await fetch(`/api/game/${gameSessionId}/undo`, { method: "POST" });
-      if (!resp.ok) throw new Error("undo failed");
-      const data = await resp.json();
-      // 用后端返回的准确状态覆盖本地
-      board = data.board;
-      turn = data.turn;
-      syncedStepCount = data.step_count;
-      // 同步历史
-      const histResp = await fetch(`/api/game/${gameSessionId}/history`);
-      const histData = await histResp.json();
-      history = histData.moves.map(m => ({
-        from: { row: m.from_row, col: m.from_col },
-        to: { row: m.to_row, col: m.to_col },
-        piece: { type: m.piece_type, color: m.piece_color },
-        captured: m.captured_type ? { type: m.captured_type, color: m.captured_color } : null,
-      }));
-      capturedRed = [];
-      capturedBlack = [];
-      history.forEach(step => {
-        if (step.captured) {
-          if (step.captured.color === "r") capturedRed.push(step.captured);
-          else capturedBlack.push(step.captured);
-        }
-      });
-    } catch (err) {
-      console.warn("后端悔棋失败，使用本地规则", err);
-      // 本地兜底
-      const last = history.pop();
-      board[last.from.row][last.from.col] = last.piece;
-      board[last.to.row][last.to.col] = last.captured;
-      if (last.captured) {
-        if (last.captured.color === "r") capturedRed.pop();
-        else capturedBlack.pop();
+  try {
+    const resp = await fetch(`/api/game/${gameSessionId}/undo`, { method: "POST" });
+    if (!resp.ok) throw new Error("undo failed");
+    const data = await resp.json();
+    // 用后端返回的准确状态覆盖本地
+    board = data.board;
+    turn = data.turn;
+    syncedStepCount = data.step_count;
+    // 同步历史
+    const histResp = await fetch(`/api/game/${gameSessionId}/history`);
+    const histData = await histResp.json();
+    history = histData.moves.map(m => ({
+      from: { row: m.from_row, col: m.from_col },
+      to: { row: m.to_row, col: m.to_col },
+      piece: { type: m.piece_type, color: m.piece_color },
+      captured: m.captured_type ? { type: m.captured_type, color: m.captured_color } : null,
+    }));
+    capturedRed = [];
+    capturedBlack = [];
+    history.forEach(step => {
+      if (step.captured) {
+        if (step.captured.color === "r") capturedRed.push(step.captured);
+        else capturedBlack.push(step.captured);
       }
-      turn = last.piece.color;
-    }
-  } else {
-    // 纯本地模式
-    const last = history.pop();
-    board[last.from.row][last.from.col] = last.piece;
-    board[last.to.row][last.to.col] = last.captured;
-    if (last.captured) {
-      if (last.captured.color === "r") capturedRed.pop();
-      else capturedBlack.pop();
-    }
-    turn = last.piece.color;
+    });
+  } catch (err) {
+    console.error("后端悔棋失败", err);
+    msgEl.textContent = "悔棋失败，请检查后端连接";
+    return;
   }
 
   selected = null;
@@ -556,10 +487,7 @@ document.getElementById("btn-restart").addEventListener("click", () => {
 // ============================================================
 document.getElementById("btn-ai").addEventListener("click", async () => {
   if (gameOver) return;
-  if (!useBackend || !gameSessionId) {
-    msgEl.textContent = "请先连接后端";
-    return;
-  }
+  if (!gameSessionId) return;
 
   const btn = document.getElementById("btn-ai");
   btn.disabled = true;
@@ -612,7 +540,7 @@ document.addEventListener("keydown", (e) => {
 function startPolling() {
   if (pollingTimer) clearInterval(pollingTimer);
   pollingTimer = setInterval(async () => {
-    if (!useBackend || !gameSessionId || gameOver) return;
+    if (!gameSessionId || gameOver) return;
     try {
       const resp = await fetch(`/api/game/${gameSessionId}`);
       const data = await resp.json();
@@ -658,395 +586,71 @@ function updateTurn() {
 }
 
 // ============================================================
-//  本地走法规则（后端不可用时的兜底）
+//  AI 对战（两个 AI 互下）
 // ============================================================
-function inBounds(r, c) {
-  return r >= 0 && r < ROWS && c >= 0 && c < COLS;
-}
+let aiVsAiTimer = null;
+let aiVsAiRunning = false;
 
-function _getRawMovesLocal(row, col) {
-  /**获取棋子原始走法（含吃子标记，不含将军校验）*/
-  const piece = board[row][col];
-  if (!piece) return [];
-  const t = piece.type, c = piece.color;
-  switch (t) {
-    case "車": return movesRook(row, col, c);
-    case "馬": return movesKnight(row, col, c);
-    case "相": case "象": return movesElephant(row, col, c);
-    case "仕": case "士": return movesAdvisor(row, col, c);
-    case "帥": case "將": return movesKing(row, col, c);
-    case "炮": case "砲": return movesCannon(row, col, c);
-    case "兵": case "卒": return movesPawn(row, col, c);
-  }
-  return [];
-}
-
-function isInCheckLocal(board, color) {
-  /**检查 color 方是否被将军*/
-  const myKingType = color === "r" ? "帥" : "將";
-  const enemyKingType = color === "r" ? "將" : "帥";
-  const enemyColor = color === "r" ? "b" : "r";
-
-  let myKing = null, enemyKing = null;
-  for (let r = 0; r < ROWS; r++) {
-    for (let c = 0; c < COLS; c++) {
-      const p = board[r][c];
-      if (!p) continue;
-      if (p.type === myKingType && p.color === color) myKing = {row: r, col: c};
-      else if (p.type === enemyKingType && p.color === enemyColor) enemyKing = {row: r, col: c};
-    }
-  }
-  if (!myKing) return true;  // 帅已被吃
-
-  // 检查所有敌方棋子是否能攻击到帅
-  for (let r = 0; r < ROWS; r++) {
-    for (let c = 0; c < COLS; c++) {
-      const p = board[r][c];
-      if (!p || p.color !== enemyColor) continue;
-      const moves = _getRawMovesLocal(r, c);
-      for (const m of moves) {
-        if (m.row === myKing.row && m.col === myKing.col) return true;
-      }
-    }
-  }
-
-  // 将帅对面检测
-  if (enemyKing && enemyKing.col === myKing.col) {
-    const minR = Math.min(myKing.row, enemyKing.row);
-    const maxR = Math.max(myKing.row, enemyKing.row);
-    for (let r = minR + 1; r < maxR; r++) {
-      if (board[r][myKing.col]) return false;
-    }
-    return true;
-  }
-  return false;
-}
-
-function getValidMovesLocal(row, col) {
-  /**获取合法走法（含将军校验，原地模拟+撤销）*/
-  const piece = board[row][col];
-  if (!piece) return [];
-
-  const raw = _getRawMovesLocal(row, col);
-  const valid = [];
-  for (const m of raw) {
-    const captured = board[m.row][m.col];
-    board[m.row][m.col] = piece;
-    board[row][col] = null;
-    if (!isInCheckLocal(board, piece.color)) {
-      valid.push(m);
-    }
-    // 撤销
-    board[row][col] = piece;
-    board[m.row][m.col] = captured;
-  }
-  return valid;
-}
-
-function movesRook(r, c, color) {
-  const res = [];
-  const dirs = [[0,1],[0,-1],[1,0],[-1,0]];
-  for (const [dr,dc] of dirs) {
-    let nr = r+dr, nc = c+dc;
-    while (inBounds(nr,nc)) {
-      const t = board[nr][nc];
-      if (!t) { res.push({row:nr,col:nc, capture:false}); }
-      else {
-        if (t.color !== color) res.push({row:nr,col:nc, capture:true});
-        break;
-      }
-      nr += dr; nc += dc;
-    }
-  }
-  return res;
-}
-
-function movesKnight(r, c, color) {
-  const res = [];
-  const jumps = [
-    [-2,-1,-1,0],[-2,1,-1,0],
-    [2,-1,1,0],[2,1,1,0],
-    [-1,-2,0,-1],[-1,2,0,1],
-    [1,-2,0,-1],[1,2,0,1],
-  ];
-  for (const [dr,dc,lr,lc] of jumps) {
-    const nr = r+dr, nc = c+dc;
-    if (!inBounds(nr,nc)) continue;
-    // 蹩马腿
-    if (board[r+lr][c+lc]) continue;
-    const t = board[nr][nc];
-    if (!t || t.color !== color) res.push({row:nr,col:nc, capture: !!t});
-  }
-  return res;
-}
-
-function movesElephant(r, c, color) {
-  const res = [];
-  const jumps = [[-2,-2],[-2,2],[2,-2],[2,2]];
-  for (const [dr,dc] of jumps) {
-    const nr = r+dr, nc = c+dc;
-    if (!inBounds(nr,nc)) continue;
-    // 象眼
-    if (board[r+dr/2][c+dc/2]) continue;
-    // 不能过河
-    if (color === "r" && nr < 5) continue;
-    if (color === "b" && nr > 4) continue;
-    const t = board[nr][nc];
-    if (!t || t.color !== color) res.push({row:nr,col:nc, capture: !!t});
-  }
-  return res;
-}
-
-function movesAdvisor(r, c, color) {
-  const res = [];
-  const jumps = [[-1,-1],[-1,1],[1,-1],[1,1]];
-  for (const [dr,dc] of jumps) {
-    const nr = r+dr, nc = c+dc;
-    if (!inBounds(nr,nc)) continue;
-    // 九宫格限制
-    if (color === "r" && (nr < 7 || nc < 3 || nc > 5)) continue;
-    if (color === "b" && (nr > 2 || nc < 3 || nc > 5)) continue;
-    const t = board[nr][nc];
-    if (!t || t.color !== color) res.push({row:nr,col:nc, capture: !!t});
-  }
-  return res;
-}
-
-function movesKing(r, c, color) {
-  const res = [];
-  const dirs = [[0,1],[0,-1],[1,0],[-1,0]];
-  for (const [dr,dc] of dirs) {
-    const nr = r+dr, nc = c+dc;
-    if (!inBounds(nr,nc)) continue;
-    if (color === "r" && (nr < 7 || nc < 3 || nc > 5)) continue;
-    if (color === "b" && (nr > 2 || nc < 3 || nc > 5)) continue;
-    const t = board[nr][nc];
-    if (!t || t.color !== color) res.push({row:nr,col:nc, capture: !!t});
-  }
-  return res;
-}
-
-function movesCannon(r, c, color) {
-  const res = [];
-  const dirs = [[0,1],[0,-1],[1,0],[-1,0]];
-  for (const [dr,dc] of dirs) {
-    let nr = r+dr, nc = c+dc;
-    let jumped = false;
-    while (inBounds(nr,nc)) {
-      const t = board[nr][nc];
-      if (!jumped) {
-        if (!t) res.push({row:nr,col:nc, capture:false});
-        else jumped = true;
-      } else {
-        if (t) {
-          if (t.color !== color) res.push({row:nr,col:nc, capture:true});
-          break;
-        }
-      }
-      nr += dr; nc += dc;
-    }
-  }
-  return res;
-}
-
-function movesPawn(r, c, color) {
-  const res = [];
-  const forward = color === "r" ? -1 : 1;
-  // 过河判断
-  const crossed = color === "r" ? r <= 4 : r >= 5;
-
-  // 向前
-  const nr = r + forward;
-  if (inBounds(nr, c)) {
-    const t = board[nr][c];
-    if (!t || t.color !== color) res.push({row:nr, col:c, capture: !!t});
-  }
-  // 过河后可左右
-  if (crossed) {
-    for (const dc of [-1, 1]) {
-      const nc = c + dc;
-      if (inBounds(r, nc)) {
-        const t = board[r][nc];
-        if (!t || t.color !== color) res.push({row:r, col:nc, capture: !!t});
-      }
-    }
-  }
-  return res;
-}
-
-// ============================================================
-//  自我对弈观战（WebSocket 实时推送）
-// ============================================================
-let spWS = null;              // WebSocket 连接
-let spGameId = null;          // 当前观战对局 ID
-let spActive = false;         // 是否正在观战
-let spPaused = false;         // 是否暂停
-let spStepCount = 0;          // 当前步数
-let spAutoAdvance = true;     // 自动推进
-let spSpeed = 5;              // 速度等级 1-10（对应延迟 1500ms→100ms）
-
-function spSpeedToDelay(speed) {
-  // 速度 1(最慢)=1500ms → 10(最快)=100ms
-  return 1600 - speed * 150;
-}
-
-document.getElementById("self-play-speed").addEventListener("input", (e) => {
-  spSpeed = parseInt(e.target.value);
-  document.getElementById("speed-display").textContent = spSpeed;
-});
-
-document.getElementById("btn-self-play-start").addEventListener("click", async () => {
-  if (spActive) return;
-  if (!useBackend) {
-    msgEl.textContent = "请先连接后端";
+document.getElementById("btn-ai-vs-ai").addEventListener("click", async () => {
+  if (gameOver || aiVsAiRunning) return;
+  if (!gameSessionId) {
+    msgEl.textContent = "请先开始对局";
     return;
   }
 
-  const startBtn = document.getElementById("btn-self-play-start");
-  const stopBtn = document.getElementById("btn-self-play-stop");
-  const statusEl = document.getElementById("sp-status");
-  startBtn.disabled = true;
-  stopBtn.disabled = false;
-  statusEl.textContent = "启动中...";
+  aiVsAiRunning = true;
+  document.getElementById("btn-ai-vs-ai").style.display = "none";
+  document.getElementById("btn-ai-vs-ai-stop").style.display = "";
+  document.getElementById("btn-ai").disabled = true;
+  document.getElementById("btn-undo").disabled = true;
+  document.getElementById("btn-restart").disabled = true;
 
-  try {
-    // 启动自我对弈
-    const resp = await fetch("/api/self-play/start", { method: "POST" });
-    if (!resp.ok) {
-      const err = await resp.json();
-      statusEl.textContent = "启动失败: " + (err.detail || "未知错误");
-      startBtn.disabled = false;
-      stopBtn.disabled = true;
+  async function aiStep() {
+    if (!aiVsAiRunning || gameOver) {
+      stopAiVsAi();
       return;
     }
-
-    const data = await resp.json();
-    spGameId = data.game_id;
-    spActive = true;
-    spPaused = false;
-    spStepCount = 0;
-    gameOver = true;  // 观战模式不容许手动走棋
-    document.getElementById("sp-winner").textContent = "";
-    document.getElementById("sp-step").textContent = "步数: 0";
-
-    statusEl.textContent = "连接WS中...";
-
-    // 连接 WebSocket
-    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    spWS = new WebSocket(`${protocol}//${window.location.host}/ws/watch/${spGameId}`);
-
-    spWS.onopen = () => {
-      statusEl.textContent = "对弈中...";
-      // 重置棋盘到初始状态
-      initBoard();
-      drawBoard();
-      renderPieces();
-      updateTurn();
-    };
-
-    spWS.onmessage = (event) => {
-      const msg = JSON.parse(event.data);
-      handleSPMessage(msg);
-    };
-
-    spWS.onerror = (err) => {
-      console.error("WebSocket error:", err);
-      statusEl.textContent = "连接错误";
-    };
-
-    spWS.onclose = () => {
-      if (spActive) {
-        statusEl.textContent = "连接断开";
-        stopSelfPlay();
+    try {
+      const resp = await fetch("/api/ai-move", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ board, turn, from_pos: { row: 0, col: 0 }, to_pos: { row: 0, col: 0 } }),
+      });
+      if (!resp.ok) {
+        msgEl.textContent = "AI 走棋失败";
+        stopAiVsAi();
+        return;
       }
-    };
-
-  } catch (err) {
-    console.error("Self-play start error:", err);
-    statusEl.textContent = "启动失败";
-    startBtn.disabled = false;
-    stopBtn.disabled = true;
+      const data = await resp.json();
+      await doMove(data.from_pos.row, data.from_pos.col, data.to_pos.row, data.to_pos.col);
+      if (!gameOver && aiVsAiRunning) {
+        aiVsAiTimer = setTimeout(aiStep, 300);
+      }
+    } catch (err) {
+      console.error("AI vs AI error:", err);
+      stopAiVsAi();
+    }
   }
+
+  aiStep();
 });
 
-document.getElementById("btn-self-play-stop").addEventListener("click", () => {
-  stopSelfPlay();
+document.getElementById("btn-ai-vs-ai-stop").addEventListener("click", () => {
+  stopAiVsAi();
 });
 
-function stopSelfPlay() {
-  spActive = false;
-  if (spWS) {
-    spWS.close();
-    spWS = null;
+function stopAiVsAi() {
+  aiVsAiRunning = false;
+  if (aiVsAiTimer) {
+    clearTimeout(aiVsAiTimer);
+    aiVsAiTimer = null;
   }
-  spGameId = null;
-  gameOver = false;
-  document.getElementById("btn-self-play-start").disabled = false;
-  document.getElementById("btn-self-play-stop").disabled = true;
-  document.getElementById("sp-status").textContent = "已停止";
+  document.getElementById("btn-ai-vs-ai").style.display = "";
+  document.getElementById("btn-ai-vs-ai-stop").style.display = "none";
+  document.getElementById("btn-ai").disabled = false;
+  document.getElementById("btn-undo").disabled = false;
+  document.getElementById("btn-restart").disabled = false;
 }
-
-function handleSPMessage(msg) {
-  const statusEl = document.getElementById("sp-status");
-  const stepEl = document.getElementById("sp-step");
-  const winnerEl = document.getElementById("sp-winner");
-
-  if (msg.type === "move") {
-    spStepCount = msg.step;
-    board = msg.board;
-    turn = msg.turn;
-
-    // 更新棋盘
-    drawBoard();
-    renderPieces();
-    updateTurn();
-    stepEl.textContent = `步数: ${spStepCount}`;
-
-    // 显示将军
-    if (msg.check) {
-      msgEl.textContent = "将军！";
-    } else {
-      msgEl.textContent = "";
-    }
-
-    // 终局检测
-    if (msg.game_over) {
-      gameOver = true;
-      const resultText = msg.game_over === "red_win" ? "红方胜！" : "黑方胜！";
-      msgEl.textContent = resultText;
-      winnerEl.textContent = resultText;
-      statusEl.textContent = "对局结束";
-    }
-
-    // 高亮最近一步走法
-    highlightLastMove(msg.from, msg.to);
-
-  } else if (msg.type === "game_over") {
-    gameOver = true;
-    spActive = false;
-    statusEl.textContent = "对局结束";
-    const resultText = msg.result === "red_win" ? "红方胜！" :
-                       msg.result === "black_win" ? "黑方胜！" : "和棋！";
-    msgEl.textContent = resultText;
-    winnerEl.textContent = resultText;
-    stepEl.textContent = `步数: ${msg.total_steps}`;
-    document.getElementById("btn-self-play-start").disabled = false;
-    document.getElementById("btn-self-play-stop").disabled = true;
-
-  } else if (msg.type === "error") {
-    statusEl.textContent = "错误: " + msg.message;
-  }
-}
-
-function highlightLastMove(fromArr, toArr) {
-  // 在棋盘上高亮最后一步的起止位置
-  // 简单实现：延迟清除
-  setTimeout(() => {
-    drawBoard();
-    renderPieces();
-  }, spSpeedToDelay(spSpeed) * 0.8);
-}
-
 
 // ============================================================
 //  启动

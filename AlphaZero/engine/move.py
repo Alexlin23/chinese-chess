@@ -1,7 +1,14 @@
-"""走法表示 — Move 值对象 + ActionEncoder 双向映射"""
+"""动作编码 — Move 值对象 + ActionEncoder 8100 动作空间
+
+action = from_square * 90 + to_square
+from_square = from_row * 9 + from_col
+to_square = to_row * 9 + to_col
+"""
 from dataclasses import dataclass
 import numpy as np
 from typing import Optional
+
+from .constants import ROWS, COLS, BOARD_SIZE, POLICY_SIZE
 
 
 @dataclass(frozen=True)
@@ -12,103 +19,80 @@ class Move:
     to_row: int
     to_col: int
 
+    @property
+    def from_square(self) -> int:
+        return self.from_row * COLS + self.from_col
+
+    @property
+    def to_square(self) -> int:
+        return self.to_row * COLS + self.to_col
+
     def __repr__(self):
         return f"Move({self.from_row},{self.from_col}→{self.to_row},{self.to_col})"
 
 
-# ============================================================
-#  ActionEncoder — 走法 ↔ 策略向量索引
-# ============================================================
-
 class ActionEncoder:
-    """双向映射：Move ↔ 策略向量索引。
+    """双向映射：Move ↔ 动作索引 (0..8099)
 
-    预计算所有合理的 (from→to) 组合，建立双向查找表。
-    策略向量 size = len(lookup)，每个索引对应一个特定走法。
+    action = from_square * 90 + to_square
     """
 
-    # 类变量，首次 build_lookup() 时填充
-    _lookup: list[tuple] = None         # [idx] → (fr,fc,tr,tc)
-    _reverse: dict = None               # (fr,fc,tr,tc) → idx
-    POLICY_SIZE: int = 0
+    @staticmethod
+    def in_bounds(row: int, col: int) -> bool:
+        return 0 <= row < ROWS and 0 <= col < COLS
 
-    @classmethod
-    def build_lookup(cls) -> None:
-        """预计算映射表。在模块加载时自动调用。"""
-        if cls._lookup is not None:
-            return
+    @staticmethod
+    def encode(move: Move) -> int:
+        """走法 → 索引，越界返回 -1"""
+        if not ActionEncoder.in_bounds(move.from_row, move.from_col):
+            return -1
+        if not ActionEncoder.in_bounds(move.to_row, move.to_col):
+            return -1
+        return move.from_square * BOARD_SIZE + move.to_square
 
-        moves_set = set()
+    @staticmethod
+    def decode(action: int) -> Optional[Move]:
+        """索引 → 走法，越界返回 None"""
+        if action < 0 or action >= POLICY_SIZE:
+            return None
+        from_square = action // BOARD_SIZE
+        to_square = action % BOARD_SIZE
+        from_row, from_col = divmod(from_square, COLS)
+        to_row, to_col = divmod(to_square, COLS)
+        return Move(from_row, from_col, to_row, to_col)
 
-        for r in range(10):
-            for c in range(9):
-                # 車/砲走法：同行同列
-                for nc in range(9):
-                    if nc != c:
-                        moves_set.add((r, c, r, nc))
-                for nr in range(10):
-                    if nr != r:
-                        moves_set.add((r, c, nr, c))
-
-                # 馬走法：8 个日字
-                for dr, dc in [(2, 1), (2, -1), (-2, 1), (-2, -1),
-                               (1, 2), (1, -2), (-1, 2), (-1, -2)]:
-                    nr, nc = r + dr, c + dc
-                    if 0 <= nr < 10 and 0 <= nc < 9:
-                        moves_set.add((r, c, nr, nc))
-
-                # 士/将走法：对角线 + 直线（含宫内）
-                for dr, dc in [(1, 1), (1, -1), (-1, 1), (-1, -1),
-                               (0, 1), (0, -1), (1, 0), (-1, 0)]:
-                    nr, nc = r + dr, c + dc
-                    if 0 <= nr < 10 and 0 <= nc < 9:
-                        moves_set.add((r, c, nr, nc))
-
-                # 象走法：田字对角
-                for dr, dc in [(2, 2), (2, -2), (-2, 2), (-2, -2)]:
-                    nr, nc = r + dr, c + dc
-                    if 0 <= nr < 10 and 0 <= nc < 9:
-                        moves_set.add((r, c, nr, nc))
-
-        cls._lookup = sorted(moves_set)
-        cls._reverse = {(fr, fc, tr, tc): i
-                        for i, (fr, fc, tr, tc) in enumerate(cls._lookup)}
-        cls.POLICY_SIZE = len(cls._lookup)
-
-    @classmethod
-    def encode(cls, move: Move) -> int:
-        """走法 → 索引"""
-        return cls._reverse.get((move.from_row, move.from_col,
-                                  move.to_row, move.to_col), -1)
-
-    @classmethod
-    def decode(cls, index: int) -> Optional[Move]:
-        """索引 → 走法"""
-        if 0 <= index < len(cls._lookup):
-            fr, fc, tr, tc = cls._lookup[index]
-            return Move(fr, fc, tr, tc)
-        return None
-
-    @classmethod
-    def legal_mask(cls, state: 'GameState') -> np.ndarray:
-        """返回 (POLICY_SIZE,) bool 数组，标记当前局面合法走法索引。"""
-        mask = np.zeros(cls.POLICY_SIZE, dtype=bool)
-        for move in state.legal_moves():
-            idx = cls.encode(move)
-            if idx >= 0:
-                mask[idx] = True
+    @staticmethod
+    def legal_mask(legal_moves: list) -> np.ndarray:
+        """返回 (8100,) bool 数组，标记合法走法"""
+        mask = np.zeros(POLICY_SIZE, dtype=bool)
+        for move in legal_moves:
+            action = ActionEncoder.encode(move)
+            if 0 <= action < POLICY_SIZE:
+                mask[action] = True
         return mask
 
-    @classmethod
-    def legal_indices(cls, state: 'GameState') -> np.ndarray:
-        """返回合法走法索引列表。"""
-        indices = []
-        for move in state.legal_moves():
-            idx = cls.encode(move)
-            if idx >= 0:
-                indices.append(idx)
-        return np.array(indices, dtype=np.int32)
+    @staticmethod
+    def legal_actions(legal_moves: list) -> np.ndarray:
+        """返回合法动作索引数组"""
+        actions = []
+        for move in legal_moves:
+            action = ActionEncoder.encode(move)
+            if 0 <= action < POLICY_SIZE:
+                actions.append(action)
+        return np.asarray(actions, dtype=np.int32)
 
+    @staticmethod
+    def mask_logits(logits: np.ndarray, legal_moves: list) -> np.ndarray:
+        """对 logits 应用合法动作掩码，非法动作设为 -inf
 
-# 模块加载时自动构建
-ActionEncoder.build_lookup()
+        Args:
+            logits: (8100,) 原始 logits
+            legal_moves: 合法走法列表
+
+        Returns:
+            masked_logits: (8100,) 掩码后的 logits
+        """
+        masked = np.full_like(logits, -np.inf)
+        mask = ActionEncoder.legal_mask(legal_moves)
+        masked[mask] = logits[mask]
+        return masked

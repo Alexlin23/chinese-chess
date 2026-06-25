@@ -1,0 +1,54 @@
+# AlphaZero 训练配置
+# 参考 DeepMind AlphaZero 规模
+
+# ── 模型架构 ──
+model:
+  blocks: 20              # 残差块数量 (AlphaZero原版20)
+  filters: 256            # 卷积通道数 (AlphaZero原版256)
+  input_channels: 18      # 输入通道数 (固定)
+
+# ── MCTS 搜索 ──
+mcts:
+  simulations: 800        # 每次搜索模拟次数 (AlphaZero原版800)
+  c_puct: 1.5             # PUCT探索系数
+  dirichlet_alpha: 0.3    # Dirichlet噪声浓度
+  dirichlet_epsilon: 0.25 # 噪声混合比例
+  batch_size: 256         # 推理batch大小
+
+# ── 自我对弈 ──
+self_play:
+  games: 25000            # 每轮对局数 (AlphaZero原版25000)
+  max_ply: 512            # 单局最大步数
+  temperature_ply: 30     # 前N步用τ=1
+
+# ── 训练 ──
+training:
+  batch_size: 4096        # 训练batch大小 (AlphaZero原版4096)
+  lr: 0.2                 # 初始学习率 (AlphaZero原版0.2)
+  lr_momentum: 0.9        # SGD动量
+  weight_decay: 0.0001      # L2正则
+  epochs: 10              # 每轮训练epoch数
+  replay_buffer: 1000000  # 经验回放大小 (AlphaZero原版1M)
+  samples_per_epoch: 100000 # 每epoch采样数
+
+# ── Arena 评估 ──
+arena:
+  games: 400              # 评估对局数 (AlphaZero原版400)
+  threshold: 0.55         # 晋升胜率阈值
+
+# ── 并行 ──
+parallel:
+  workers: null           # self-play worker数 (null=CPU核心数)
+  inference_batch: 256    # InferenceServer batch大小
+  inference_wait_ms: 10   # 最大等待时间(ms)
+
+# ── 系统 ──
+system:
+  checkpoint_dir: "AlphaZero/checkpoints"
+  log_interval: 100
+  save_interval: 1
+  monitor_interval: 5      # 监控刷新间隔(秒)
+
+# ── 训练循环 ──
+pipeline:
+  max_iterations: 100     # 总迭代次数

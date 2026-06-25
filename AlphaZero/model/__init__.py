@@ -1,5 +1,3 @@
-"""AlphaZero 神经网络模型"""
-from .network import AlphaZeroNet, ResBlock
+"""AlphaZero 模型模块"""
+from .network import PolicyWDLEncoder, ResBlock
 from .neural_eval import NeuralEvaluator
-
-__all__ = ["AlphaZeroNet", "ResBlock", "NeuralEvaluator"]

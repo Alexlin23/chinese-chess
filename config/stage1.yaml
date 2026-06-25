@@ -1,0 +1,43 @@
+# 正式训练配置 — 渐进式规模
+# 先跑小规模验证，再放大
+
+model:
+  blocks: 20
+  filters: 256
+
+mcts:
+  simulations: 100        # 先100验证，确认稳定后改800
+  c_puct: 1.5
+  dirichlet_alpha: 0.3
+  dirichlet_epsilon: 0.25
+  batch_size: 256
+
+self_play:
+  games: 100              # 先100局验证，确认稳定后改25000
+  max_ply: 300
+  temperature_ply: 30
+
+training:
+  batch_size: 512         # 根据显存调整
+  lr: 0.2
+  lr_momentum: 0.9
+  weight_decay: 0.0001
+  epochs: 5
+  replay_buffer: 100000
+  samples_per_epoch: 50000
+
+arena:
+  games: 20               # 先20局验证，确认稳定后改400
+  threshold: 0.55
+
+parallel:
+  workers: 16             # 用16个worker（留4核给系统）
+  inference_batch: 64     # 较小batch降低延迟
+  inference_wait_ms: 5.0  # 短等待
+
+system:
+  checkpoint_dir: "AlphaZero/checkpoints"
+  monitor_interval: 3
+
+pipeline:
+  max_iterations: 5       # 先跑5轮验证
