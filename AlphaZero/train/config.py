@@ -30,7 +30,7 @@ class AlphaZeroConfig:
     repetition_limit: int = 3
 
     # ── 训练 ──
-    batch_size: int = 512
+    batch_size: int = 4096
     learning_rate: float = 0.2
     lr_momentum: float = 0.9
     lr_decay_step: int = 100000
