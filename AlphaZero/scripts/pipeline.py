@@ -94,8 +94,8 @@ def parallel_self_play(config: AlphaZeroConfig,
                       f"({stats['elapsed']:.0f}s) "
                       f"[{workers_done}/{num_workers}]")
         else:
-            state_enc, policy, wdl = item
-            replay.add(state_enc, policy, wdl)
+            state_enc, policy, wdl, weight = item
+            replay.add(state_enc, policy, wdl, weight)
 
         # 更新监控
         monitor.update(

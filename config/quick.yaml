@@ -15,13 +15,16 @@ self_play:
   temperature_ply: 10
 
 training:
-  batch_size: 32
+  batch_size: 64
   lr: 0.01
   lr_momentum: 0.9
   weight_decay: 0.0001
   epochs: 2
   replay_buffer: 5000
   samples_per_epoch: 1000
+  capture_reward: 0.3
+  non_terminal_base_weight: 0.001
+  terminal_weight: 2.0
 
 arena:
   games: 4

@@ -25,6 +25,9 @@ training:
   epochs: 5
   replay_buffer: 100000
   samples_per_epoch: 50000
+  capture_reward: 0.3
+  non_terminal_base_weight: 0.001
+  terminal_weight: 2.0
 
 arena:
   games: 20

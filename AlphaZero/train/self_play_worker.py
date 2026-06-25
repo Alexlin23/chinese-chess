@@ -114,7 +114,10 @@ def self_play_worker_fn(
             if move is None:
                 break
 
-            positions.append((state.encode(), policy.copy(), state.turn))
+            # 检查是否吃子
+            captured = state.board[move.to_row][move.to_col] is not None
+
+            positions.append((state.encode(), policy.copy(), state.turn, captured))
             state = state.apply(move)
 
         # 终局结果
@@ -123,10 +126,22 @@ def self_play_worker_fn(
             from AlphaZero.engine.state import GameResult
             result = GameResult(None, "max_ply")
 
-        for state_enc, policy, is_red in positions:
+        for state_enc, policy, is_red, captured in positions:
             current_player = RED if is_red else BLACK
             wdl = result.to_wdl(current_player)
-            replay.add(state_enc, policy, wdl)
+
+            # 计算权重
+            if result.is_draw or result.winner is None:
+                # 和棋或非终局：基础权重
+                weight = config.non_terminal_base_weight
+            else:
+                # 终局：根据是否吃子给不同权重
+                weight = config.terminal_weight if captured else 1.0
+                # 吃子额外奖励
+                if captured:
+                    weight += config.capture_reward
+
+            replay.add(state_enc, policy, wdl, weight)
 
         if result.is_draw:
             stats['draw'] += 1
@@ -147,6 +162,7 @@ def self_play_worker_fn(
                 replay.states[i],
                 replay.policies[i],
                 replay.wdls[i],
+                replay.weights[i],
             ))
 
     result_queue.put(('DONE', stats, None))

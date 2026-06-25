@@ -89,13 +89,14 @@ class Trainer:
             n_batches = 0
 
             # 随机采样
-            states, policies, wdls = replay.sample(
+            states, policies, wdls, weights = replay.sample(
                 min(samples_per_epoch, len(replay))
             )
             dataset = TensorDataset(
                 torch.from_numpy(states),
                 torch.from_numpy(policies),
                 torch.from_numpy(wdls),
+                torch.from_numpy(weights),
             )
             dataloader = DataLoader(
                 dataset,
@@ -106,20 +107,23 @@ class Trainer:
                 drop_last=True,
             )
 
-            for batch_states, batch_policies, batch_wdls in dataloader:
+            for batch_states, batch_policies, batch_wdls, batch_weights in dataloader:
                 batch_states = batch_states.to(self.device)
                 batch_policies = batch_policies.to(self.device)
                 batch_wdls = batch_wdls.to(self.device)
+                batch_weights = batch_weights.to(self.device)
 
                 # 前向传播
                 p_logits, w_logits = self.model(batch_states)
 
-                # Policy loss: cross-entropy
+                # Policy loss: cross-entropy (加权)
                 log_probs = F.log_softmax(p_logits, dim=1)
-                policy_loss = -(batch_policies * log_probs).sum(dim=1).mean()
+                policy_loss = -(batch_policies * log_probs).sum(dim=1)
+                policy_loss = (policy_loss * batch_weights).mean()
 
-                # WDL loss: cross-entropy
-                wdl_loss = F.cross_entropy(w_logits, batch_wdls)
+                # WDL loss: cross-entropy (加权)
+                wdl_loss = F.cross_entropy(w_logits, batch_wdls, reduction='none')
+                wdl_loss = (wdl_loss * batch_weights).mean()
 
                 # 总损失
                 loss = policy_loss + wdl_loss

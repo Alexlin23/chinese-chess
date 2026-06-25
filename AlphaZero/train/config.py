@@ -30,7 +30,7 @@ class AlphaZeroConfig:
     repetition_limit: int = 3
 
     # ── 训练 ──
-    batch_size: int = 4096
+    batch_size: int = 512
     learning_rate: float = 0.2
     lr_momentum: float = 0.9
     lr_decay_step: int = 100000
@@ -39,6 +39,11 @@ class AlphaZeroConfig:
     epochs_per_iteration: int = 10
     replay_buffer_size: int = 1_000_000
     samples_per_epoch: int = 100000
+
+    # ── 奖励权重 ──
+    capture_reward: float = 0.3        # 吃子奖励（远小于赢棋的 1.0）
+    non_terminal_base_weight: float = 0.001  # 非终局位置基础权重
+    terminal_weight: float = 2.0       # 终局位置权重
 
     # ── Arena ──
     arena_games: int = 400
@@ -104,6 +109,9 @@ class AlphaZeroConfig:
             config.epochs_per_iteration = data['training'].get('epochs', config.epochs_per_iteration)
             config.replay_buffer_size = data['training'].get('replay_buffer', config.replay_buffer_size)
             config.samples_per_epoch = data['training'].get('samples_per_epoch', config.samples_per_epoch)
+            config.capture_reward = data['training'].get('capture_reward', config.capture_reward)
+            config.non_terminal_base_weight = data['training'].get('non_terminal_base_weight', config.non_terminal_base_weight)
+            config.terminal_weight = data['training'].get('terminal_weight', config.terminal_weight)
 
         # Arena
         if 'arena' in data:
