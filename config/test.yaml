@@ -1,38 +1,47 @@
-# 轻量级配置 — 用于快速测试
+# 测试配置 — 基于 default，只改 games 和 iterations
 
 model:
-  blocks: 4
-  filters: 32
+  blocks: 20
+  filters: 256
 
 mcts:
-  simulations: 16
+  simulations: 800
   c_puct: 1.5
-  batch_size: 32
+  dirichlet_alpha: 0.3
+  dirichlet_epsilon: 0.25
+  batch_size: 800
 
 self_play:
-  games: 10
-  max_ply: 100
-  temperature_ply: 20
+  games: 2500             # 测试用，减少每轮游戏数
+  max_ply: 512
+  temperature_ply: 30
 
 training:
-  batch_size: 64
-  lr: 0.01
-  epochs: 2
-  replay_buffer: 5000
-  samples_per_epoch: 1000
+  batch_size: 4096
+  lr: 0.2
+  lr_momentum: 0.9
+  weight_decay: 0.0001
+  epochs: 10
+  replay_buffer: 1000000
+  samples_per_epoch: 100000
+  capture_reward: 0.3
+  non_terminal_base_weight: 0.001
+  terminal_weight: 2.0
 
 arena:
-  games: 4
+  games: 400
   threshold: 0.55
 
 parallel:
-  workers: 2
-  inference_batch: 16
-  inference_wait_ms: 5.0
+  workers: null
+  inference_batch: 800
+  inference_wait_ms: 10
 
 system:
-  checkpoint_dir: "AlphaZero/checkpoints_test"
+  checkpoint_dir: "AlphaZero/checkpoints"
+  log_interval: 100
+  save_interval: 1
   monitor_interval: 5
 
 pipeline:
-  max_iterations: 3
+  max_iterations: 10      # 测试用，减少轮次
