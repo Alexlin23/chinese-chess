@@ -106,6 +106,17 @@ def parallel_self_play(config: AlphaZeroConfig,
             samples=len(replay),
         )
 
+        # 每60秒打印一次进度估算
+        elapsed = time.perf_counter() - t_start
+        if verbose and elapsed > 0 and int(elapsed) % 60 < 2:
+            remaining_workers = num_workers - workers_done
+            if workers_done > 0:
+                avg_time_per_worker = elapsed / workers_done
+                eta = avg_time_per_worker * remaining_workers
+                print(f"  进度: {workers_done}/{num_workers} workers, "
+                      f"{total_stats['games']}局/{games_per_worker * num_workers}局, "
+                      f"{len(replay)}样本, ETA={eta/60:.0f}min")
+
     stop_event.set()
     server.stop()
     for p in processes:

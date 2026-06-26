@@ -143,11 +143,15 @@ class InferenceServer:
                 t_forward = time.perf_counter() - t0
 
                 t0 = time.perf_counter()
-                p_logits = p_logits.clone()
-                p_logits[~mask_tensor] = float('-inf')
-                policy_probs = torch.softmax(p_logits, dim=1).cpu().numpy()
-                wdl_probs = torch.softmax(w_logits, dim=1).cpu().numpy()
+                # 避免 clone: 用 masked_fill 替代
+                p_logits = p_logits.masked_fill(~mask_tensor, float('-inf'))
+                policy_probs = torch.softmax(p_logits, dim=1)
+                wdl_probs = torch.softmax(w_logits, dim=1)
                 values = wdl_probs[:, 0] - wdl_probs[:, 2]
+                # 一次性转 numpy（减少 GPU→CPU 次数）
+                policy_probs = policy_probs.cpu().numpy()
+                wdl_probs = wdl_probs.cpu().numpy()
+                values = values.cpu().numpy()
                 t_post = time.perf_counter() - t0
 
                 t0 = time.perf_counter()
@@ -164,14 +168,17 @@ class InferenceServer:
                 total_requests += n
                 total_batches += 1
 
-                # 每50个batch打印一次详细计时
-                if total_batches % 50 == 0:
+                # 每20个batch打印一次详细计时 + 吞吐量
+                if total_batches % 20 == 0:
+                    elapsed = time.perf_counter() - t_start
+                    throughput = total_requests / max(elapsed, 1)
                     print(f"[InferenceServer] n={n} "
                           f"to_gpu={t_to_gpu*1000:.1f}ms "
                           f"forward={t_forward*1000:.1f}ms "
                           f"post={t_post*1000:.1f}ms "
                           f"dist={t_dist*1000:.1f}ms "
-                          f"total={total_requests} req")
+                          f"total={total_requests} req "
+                          f"throughput={throughput:.0f} req/s")
 
             except Exception as e:
                 print(f"[InferenceServer] 推理错误: {e}")
