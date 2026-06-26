@@ -106,16 +106,31 @@ def parallel_self_play(config: AlphaZeroConfig,
             samples=len(replay),
         )
 
-        # 每60秒打印一次进度估算
+        # 每60秒打印一次进度估算 + GPU/CPU 状态
         elapsed = time.perf_counter() - t_start
         if verbose and elapsed > 0 and int(elapsed) % 60 < 2:
             remaining_workers = num_workers - workers_done
             if workers_done > 0:
                 avg_time_per_worker = elapsed / workers_done
                 eta = avg_time_per_worker * remaining_workers
-                print(f"  进度: {workers_done}/{num_workers} workers, "
-                      f"{total_stats['games']}局/{games_per_worker * num_workers}局, "
-                      f"{len(replay)}样本, ETA={eta/60:.0f}min")
+                # 获取 GPU/CPU 状态
+                import psutil
+                cpu_percent = psutil.cpu_percent(interval=0.1)
+                try:
+                    import subprocess
+                    gpu_result = subprocess.run(
+                        ['nvidia-smi', '--query-gpu=utilization.gpu,memory.used',
+                         '--format=csv,noheader,nounits'],
+                        capture_output=True, text=True, timeout=5)
+                    gpu_util, gpu_mem = gpu_result.stdout.strip().split(', ')
+                    gpu_info = f"GPU={gpu_util}%, MEM={int(gpu_mem)/1024:.1f}GB"
+                except:
+                    gpu_info = "GPU=N/A"
+                print(f"  [进度] Workers={workers_done}/{num_workers} "
+                      f"对局={total_stats['games']}/{games_per_worker * num_workers} "
+                      f"样本={len(replay)} "
+                      f"CPU={cpu_percent:.0f}% {gpu_info} "
+                      f"ETA={eta/60:.0f}min")
 
     stop_event.set()
     server.stop()
