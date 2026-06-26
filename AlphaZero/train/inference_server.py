@@ -143,15 +143,11 @@ class InferenceServer:
                 t_forward = time.perf_counter() - t0
 
                 t0 = time.perf_counter()
-                # 避免 clone: 用 masked_fill 替代
-                p_logits = p_logits.masked_fill(~mask_tensor, float('-inf'))
-                policy_probs = torch.softmax(p_logits, dim=1)
-                wdl_probs = torch.softmax(w_logits, dim=1)
+                p_logits = p_logits.clone()
+                p_logits[~mask_tensor] = float('-inf')
+                policy_probs = torch.softmax(p_logits, dim=1).cpu().numpy()
+                wdl_probs = torch.softmax(w_logits, dim=1).cpu().numpy()
                 values = wdl_probs[:, 0] - wdl_probs[:, 2]
-                # 一次性转 numpy（减少 GPU→CPU 次数）
-                policy_probs = policy_probs.cpu().numpy()
-                wdl_probs = wdl_probs.cpu().numpy()
-                values = values.cpu().numpy()
                 t_post = time.perf_counter() - t0
 
                 t0 = time.perf_counter()
