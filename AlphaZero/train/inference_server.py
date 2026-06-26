@@ -112,6 +112,13 @@ class InferenceServer:
         print(f"[InferenceServer] 模型已加载到 {device}, "
               f"参数量: {model.count_parameters():,}")
 
+        # 预分配 GPU tensor（避免重复分配）
+        max_batch = batch_size * 2  # 留余量
+        prealloc_states = torch.zeros((max_batch, INPUT_CHANNELS, 10, 9),
+                                      dtype=torch.float32, device=device)
+        prealloc_masks = torch.zeros((max_batch, POLICY_SIZE),
+                                     dtype=torch.bool, device=device)
+
         total_requests = 0
         total_batches = 0
         t_start = time.perf_counter()
@@ -133,8 +140,11 @@ class InferenceServer:
                 masks_arr = req.masks
                 n = len(states)
 
-                state_tensor = torch.from_numpy(states).to(device, non_blocking=True)
-                mask_tensor = torch.from_numpy(masks_arr).to(device, non_blocking=True)
+                # 使用预分配 tensor（避免重复分配内存）
+                prealloc_states[:n].copy_(torch.from_numpy(states))
+                prealloc_masks[:n].copy_(torch.from_numpy(masks_arr))
+                state_tensor = prealloc_states[:n]
+                mask_tensor = prealloc_masks[:n]
                 t_to_gpu = time.perf_counter() - t0
 
                 t0 = time.perf_counter()
