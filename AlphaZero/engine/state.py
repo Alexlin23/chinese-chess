@@ -69,7 +69,7 @@ class GameState:
     """
 
     __slots__ = ('board', 'turn', 'move_count', 'no_capture_count',
-                 'repetition_counts', 'last_move')
+                 'repetition_counts', 'last_move', '_encoding', '_legal_mask')
 
     def __init__(self, board: np.ndarray, turn,
                  move_count=0, no_capture_count=0,
@@ -83,6 +83,8 @@ class GameState:
         self.no_capture_count = no_capture_count
         self.repetition_counts = repetition_counts if repetition_counts is not None else {}
         self.last_move = last_move
+        self._encoding = None  # 缓存
+        self._legal_mask = None  # 缓存
 
     def copy(self) -> 'GameState':
         """浅拷贝（board 是 numpy 数组，apply 时会 copy）"""
@@ -117,8 +119,11 @@ class GameState:
         return ActionEncoder.legal_actions(self.legal_moves())
 
     def legal_mask(self) -> np.ndarray:
-        """返回 (8100,) bool 合法动作掩码"""
-        return ActionEncoder.legal_mask(self.legal_moves())
+        """返回 (8100,) bool 合法动作掩码。使用缓存。"""
+        if self._legal_mask is not None:
+            return self._legal_mask
+        self._legal_mask = ActionEncoder.legal_mask(self.legal_moves())
+        return self._legal_mask
 
     def is_legal(self, move: Move) -> bool:
         """单步走法合法性校验"""
@@ -260,7 +265,7 @@ class GameState:
     # ── 编码 ──
 
     def encode(self) -> np.ndarray:
-        """编码为神经网络输入 (18, 10, 9) float32。
+        """编码为神经网络输入 (18, 10, 9) float32。使用缓存。
 
         通道:
           0-6:  己方棋子位 (王..兵)
@@ -270,6 +275,9 @@ class GameState:
           16:   无吃子步数 / 60
           17:   将军标记
         """
+        if self._encoding is not None:
+            return self._encoding
+
         from .constants import MAX_GAME_PLY
         encoded = np.zeros((18, ROWS, COLS), dtype=np.float32)
 
@@ -298,6 +306,7 @@ class GameState:
         if is_in_check(self.board, self.turn):
             encoded[17] = 1.0
 
+        self._encoding = encoded
         return encoded
 
     def __repr__(self):
