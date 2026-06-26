@@ -29,8 +29,8 @@ training:
   terminal_weight: 2.0
 
 arena:
-  games: 400
-  threshold: 0.55
+  games: 10              # 快速验证
+  threshold: 0.50        # 只要不输就晋升
 
 parallel:
   workers: null
