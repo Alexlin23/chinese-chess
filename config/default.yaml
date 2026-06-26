@@ -14,6 +14,7 @@ mcts:
   dirichlet_alpha: 0.3    # Dirichlet噪声浓度
   dirichlet_epsilon: 0.25 # 噪声混合比例
   batch_size: 800         # = simulations，一轮完成
+  virtual_loss: 3.0       # 虚拟损失，防止batch内重复选路径
 
 # ── 自我对弈 ──
 self_play:
@@ -31,7 +32,7 @@ training:
   replay_buffer: 1000000  # 经验回放大小 (AlphaZero原版1M)
   samples_per_epoch: 100000 # 每epoch采样数
   capture_reward: 0.3     # 吃子奖励（远小于赢棋的1.0）
-  non_terminal_base_weight: 0.001  # 非终局位置基础权重
+  non_terminal_base_weight: 1.0    # 非终局位置基础权重（冷启动期和棋是主要信号）
   terminal_weight: 2.0    # 终局位置权重
 
 # ── Arena 评估 ──

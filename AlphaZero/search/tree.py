@@ -29,13 +29,15 @@ class MCTS:
                  c_puct: float = 1.5,
                  dirichlet_alpha: float = 0.3,
                  dirichlet_epsilon: float = 0.25,
-                 batch_size: int = 32):
+                 batch_size: int = 32,
+                 virtual_loss: float = 3.0):
         self.evaluator = evaluator
         self.num_simulations = num_simulations
         self.c_puct = c_puct
         self.dirichlet_alpha = dirichlet_alpha
         self.dirichlet_epsilon = dirichlet_epsilon
         self.batch_size = batch_size
+        self.virtual_loss = virtual_loss
 
     def search(self, root_state: GameState,
                temperature: float = 1.0) -> np.ndarray:
@@ -81,11 +83,9 @@ class MCTS:
             nonterminal_leaves = [l for l in leaves if not l[3]]
 
             # 终局节点直接回传
+            # _backup 从叶节点视角开始，自动交替翻转符号
             for node, state, path, is_term, term_val in terminal_leaves:
-                value = term_val
-                if state.turn != root_state.turn:
-                    value = -value
-                self._backup(path, value, root)
+                self._backup(path, term_val, root)
 
             # 非终局节点 batch evaluate
             if nonterminal_leaves:
@@ -104,11 +104,7 @@ class MCTS:
                         node.children[int(idx)] = MCTSNode(
                             prior=float(max(policy[idx], uniform_prior * 0.1)))
 
-                    # 视角翻转
-                    if state.turn != root_state.turn:
-                        value = -value
-
-                    # 回传
+                    # _backup 从叶节点视角开始，自动交替翻转符号
                     self._backup(path, value, root)
 
             sims_done += batch_count
@@ -165,7 +161,7 @@ class MCTS:
     # ── 选择 ──
 
     def _select_leaf(self, root: MCTSNode, root_state: GameState):
-        """选择一个叶节点。"""
+        """选择一个叶节点。施加虚拟损失防止同batch重复选择。"""
         node = root
         state = root_state.copy()
         path = []
@@ -176,6 +172,9 @@ class MCTS:
                 break
             path.append((node, idx))
             node = node.children[idx]
+            # 虚拟损失：压低Q和inflate N，阻止同batch内重复选此路径
+            node.visit_count += self.virtual_loss
+            node.total_value -= self.virtual_loss
             move = ActionEncoder.decode(idx)
             if move is None:
                 break
@@ -187,17 +186,34 @@ class MCTS:
                 value = 0.0
             else:
                 value = r.to_value(state.turn)
+            path.append((node, -1))          # 叶节点加入path
             return (node, state, path, True, value)
 
+        path.append((node, -1))              # 叶节点加入path
         return (node, state, path, False, 0.0)
 
     def _backup(self, path, value, root):
-        """沿路径回传值。"""
-        for node, _ in reversed(path):
-            node.visit_count += 1
-            node.total_value += value
-            value = -value
-        root.visit_count += 1
+        """沿路径回传值。撤销虚拟损失，计入真实统计。
+
+        path = [(root, a0), (child1, a1), ..., (leaf, -1)]
+        value 为叶节点视角估值。从叶节点开始，每向上一层翻转符号。
+        除 root 外所有节点均施加过虚拟损失，需要撤销。
+        """
+        n = len(path)
+        vl = self.virtual_loss
+        for i, (node, _) in enumerate(reversed(path)):
+            at_root = (i == n - 1)  # root 是 reversed 的最后一个元素
+
+            if at_root:
+                # root 没有虚拟损失，直接计入真实统计
+                node.visit_count += 1
+                node.total_value += value
+            else:
+                # 撤销虚拟损失 + 计入真实值
+                node.visit_count += 1 - vl
+                node.total_value += value + vl
+
+            value = -value           # 翻转为上一层视角
 
     # ── 扩展 ──
 

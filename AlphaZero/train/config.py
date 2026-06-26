@@ -22,6 +22,7 @@ class AlphaZeroConfig:
     dirichlet_alpha: float = 0.3
     dirichlet_epsilon: float = 0.25
     mcts_batch_size: int = 256
+    virtual_loss: float = 3.0
 
     # ── 自我对弈 ──
     temperature_ply: int = 30
@@ -42,7 +43,7 @@ class AlphaZeroConfig:
 
     # ── 奖励权重 ──
     capture_reward: float = 0.3        # 吃子奖励（远小于赢棋的 1.0）
-    non_terminal_base_weight: float = 0.001  # 非终局位置基础权重
+    non_terminal_base_weight: float = 1.0    # 非终局位置基础权重（冷启动期和棋是主要信号，不应压低）
     terminal_weight: float = 2.0       # 终局位置权重
 
     # ── Arena ──
@@ -93,6 +94,7 @@ class AlphaZeroConfig:
             config.dirichlet_alpha = data['mcts'].get('dirichlet_alpha', config.dirichlet_alpha)
             config.dirichlet_epsilon = data['mcts'].get('dirichlet_epsilon', config.dirichlet_epsilon)
             config.mcts_batch_size = data['mcts'].get('batch_size', config.mcts_batch_size)
+            config.virtual_loss = data['mcts'].get('virtual_loss', config.virtual_loss)
 
         # 自我对弈
         if 'self_play' in data:

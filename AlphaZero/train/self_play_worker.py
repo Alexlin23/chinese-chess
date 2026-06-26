@@ -91,6 +91,7 @@ def self_play_worker_fn(
         dirichlet_alpha=config.dirichlet_alpha,
         dirichlet_epsilon=config.dirichlet_epsilon,
         batch_size=config.mcts_batch_size,
+        virtual_loss=config.virtual_loss,
     )
 
     replay = ReplayBuffer(max_size=num_games * config.max_game_ply)
@@ -101,7 +102,7 @@ def self_play_worker_fn(
         if stop_event.is_set():
             break
 
-        state = GameState.new_game()
+        state = GameState.new_game(max_ply=config.max_game_ply)
         positions = []
 
         while not state.is_terminal() and state.move_count < config.max_game_ply:

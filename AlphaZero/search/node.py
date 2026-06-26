@@ -25,11 +25,13 @@ class MCTSNode:
         """选择 PUCT 值最大的子节点。返回 move_index。"""
         best_idx = -1
         best_score = -float('inf')
-        sqrt_parent = self.visit_count ** 0.5
+        sqrt_parent = max(self.visit_count, 1) ** 0.5
 
         for idx, child in self.children.items():
             # PUCT = Q + c_puct * P * sqrt(N_parent) / (1 + N_child)
             score = child.q + c_puct * child.prior * sqrt_parent / (1.0 + child.visit_count)
+            # 微小噪声打破平局，score差距>>1e-8时不影响正常排序
+            score += 1e-8 * np.random.random()
             if score > best_score:
                 best_score = score
                 best_idx = idx

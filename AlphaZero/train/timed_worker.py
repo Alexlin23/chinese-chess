@@ -13,7 +13,7 @@ from AlphaZero.engine import GameState, RED, BLACK
 from AlphaZero.engine.move import ActionEncoder
 from AlphaZero.engine.constants import POLICY_SIZE
 from AlphaZero.train.config import AlphaZeroConfig
-from AlphaZero.train.inference_server import InferenceRequest, InferenceResponse
+from AlphaZero.train.inference_server import BatchRequest, BatchResponse
 
 
 class TimedRemoteEvaluator:
@@ -34,65 +34,40 @@ class TimedRemoteEvaluator:
         self.n_calls = 0
 
     def evaluate(self, state: GameState) -> tuple[np.ndarray, float]:
-        """评估单个局面"""
+        """评估单个局面（通过 batch 接口）"""
+        policies, values = self.evaluate_batch([state])
+        return policies[0], values[0]
+
+    def evaluate_batch(self, states: list[GameState]) -> tuple[np.ndarray, np.ndarray]:
+        """批量评估：一次打包发送，一次接收"""
+        n = len(states)
+        self._request_counter += 1
+
         # 编码
         t0 = time.perf_counter()
-        state_enc = state.encode()
-        legal_mask = state.legal_mask()
+        state_list = np.stack([s.encode() for s in states])
+        mask_list = np.stack([s.legal_mask() for s in states])
         self.t_encode += time.perf_counter() - t0
 
-        self._request_counter += 1
-        req = InferenceRequest(
+        req = BatchRequest(
             request_id=self._request_counter,
-            state_encoding=state_enc,
-            legal_mask=legal_mask,
+            states=state_list,
+            masks=mask_list,
             worker_id=self.worker_id,
         )
 
-        # 发送请求
+        # 发送
         t0 = time.perf_counter()
         self.request_queue.put(req)
         self.t_queue_put += time.perf_counter() - t0
 
-        # 等待响应
+        # 接收
         t0 = time.perf_counter()
-        resp: InferenceResponse = self.response_queue.get(timeout=120)
-        self.t_queue_get += time.perf_counter() - t0
-
-        self.n_calls += 1
-        return resp.policy_probs, resp.value
-
-    def evaluate_batch(self, states: list[GameState]) -> tuple[np.ndarray, np.ndarray]:
-        """批量评估：先全部提交，再全部收集"""
-        n = len(states)
-
-        # 编码 + 提交
-        t0 = time.perf_counter()
-        for s in states:
-            state_enc = s.encode()
-            legal_mask = s.legal_mask()
-            self._request_counter += 1
-            req = InferenceRequest(
-                request_id=self._request_counter,
-                state_encoding=state_enc,
-                legal_mask=legal_mask,
-                worker_id=self.worker_id,
-            )
-            self.request_queue.put(req)
-        self.t_encode += time.perf_counter() - t0
-
-        # 收集
-        t0 = time.perf_counter()
-        policies = []
-        values = []
-        for _ in range(n):
-            resp: InferenceResponse = self.response_queue.get(timeout=120)
-            policies.append(resp.policy_probs)
-            values.append(resp.value)
+        resp: BatchResponse = self.response_queue.get(timeout=120)
         self.t_queue_get += time.perf_counter() - t0
 
         self.n_calls += n
-        return np.stack(policies), np.array(values, dtype=np.float32)
+        return resp.policies, resp.values
 
     def report(self, total_time: float):
         """打印计时报告"""
@@ -126,6 +101,7 @@ def timed_self_play_worker_fn(
         dirichlet_alpha=config.dirichlet_alpha,
         dirichlet_epsilon=config.dirichlet_epsilon,
         batch_size=config.mcts_batch_size,
+        virtual_loss=config.virtual_loss,
     )
 
     replay = ReplayBuffer(max_size=num_games * config.max_game_ply)
@@ -137,7 +113,7 @@ def timed_self_play_worker_fn(
             break
 
         t_game_start = time.perf_counter()
-        state = GameState.new_game()
+        state = GameState.new_game(max_ply=config.max_game_ply)
         positions = []
         move_count = 0
 
@@ -154,7 +130,10 @@ def timed_self_play_worker_fn(
             if move is None:
                 break
 
-            positions.append((state.encode(), policy.copy(), state.turn))
+            # 检查是否吃子
+            captured = state.board[move.to_row][move.to_col] is not None
+
+            positions.append((state.encode(), policy.copy(), state.turn, captured))
             state = state.apply(move)
             move_count += 1
 
@@ -169,10 +148,19 @@ def timed_self_play_worker_fn(
             from AlphaZero.engine.state import GameResult
             result = GameResult(None, "max_ply")
 
-        for state_enc, policy, is_red in positions:
+        for state_enc, policy, is_red, captured in positions:
             current_player = RED if is_red else BLACK
             wdl = result.to_wdl(current_player)
-            replay.add(state_enc, policy, wdl)
+
+            # 计算权重（对齐 self_play_worker.py）
+            if result.is_draw or result.winner is None:
+                weight = config.non_terminal_base_weight
+            else:
+                weight = config.terminal_weight if captured else 1.0
+                if captured:
+                    weight += config.capture_reward
+
+            replay.add(state_enc, policy, wdl, weight)
 
         if result.is_draw:
             stats['draw'] += 1
@@ -200,6 +188,7 @@ def timed_self_play_worker_fn(
                 replay.states[i],
                 replay.policies[i],
                 replay.wdls[i],
+                replay.weights[i],
             ))
 
     result_queue.put(('DONE', stats, None))

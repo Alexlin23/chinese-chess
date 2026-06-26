@@ -40,10 +40,11 @@ class Trainer:
             num_filters=config.num_filters,
         ).to(device)
 
-        # 优化器
-        self.optimizer = torch.optim.Adam(
+        # 优化器 — SGD + Momentum（对齐 AlphaZero 论文）
+        self.optimizer = torch.optim.SGD(
             self.model.parameters(),
             lr=config.learning_rate,
+            momentum=config.lr_momentum,
             weight_decay=config.weight_decay,
         )
 
@@ -209,12 +210,22 @@ class Trainer:
         return str(path)
 
     def load_checkpoint(self, path: str) -> dict:
-        """加载模型检查点。"""
+        """加载模型检查点（兼容旧 Adam checkpoint 的优化器状态）。"""
         state = torch.load(path, map_location=self.device, weights_only=False)
         self.model.load_state_dict(state['model_state_dict'])
-        self.optimizer.load_state_dict(state['optimizer_state_dict'])
+
+        # 优化器状态：兼容旧版 Adam → 新版 SGD 迁移
+        try:
+            self.optimizer.load_state_dict(state['optimizer_state_dict'])
+        except (KeyError, ValueError, RuntimeError):
+            print("  优化器状态不兼容（旧版 Adam checkpoint），使用全新优化器从头开始")
+
         if 'scheduler_state_dict' in state:
-            self.scheduler.load_state_dict(state['scheduler_state_dict'])
+            try:
+                self.scheduler.load_state_dict(state['scheduler_state_dict'])
+            except (KeyError, ValueError, RuntimeError):
+                pass
+
         self.current_iteration = state.get('iteration', 0)
         self.train_losses = state.get('train_losses', [])
         self.policy_losses = state.get('policy_losses', [])

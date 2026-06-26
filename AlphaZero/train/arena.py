@@ -121,7 +121,7 @@ class Arena:
         """执行一局对战"""
         from ..engine.state import GameResult as GR
  
-        state = GameState.new_game()
+        state = GameState.new_game(max_ply=self.config.max_game_ply)
 
         red_mcts = MCTS(
             evaluator=red_eval,

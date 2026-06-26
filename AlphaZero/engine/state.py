@@ -69,11 +69,13 @@ class GameState:
     """
 
     __slots__ = ('board', 'turn', 'move_count', 'no_capture_count',
-                 'repetition_counts', 'last_move', '_encoding', '_legal_mask')
+                 'repetition_counts', 'last_move', '_max_ply',
+                 '_encoding', '_legal_mask')
 
     def __init__(self, board: np.ndarray, turn,
                  move_count=0, no_capture_count=0,
-                 repetition_counts=None, last_move=None):
+                 repetition_counts=None, last_move=None,
+                 max_ply: int = None):
         self.board = board
         if isinstance(turn, str):
             self.turn = (turn == "r")
@@ -83,6 +85,7 @@ class GameState:
         self.no_capture_count = no_capture_count
         self.repetition_counts = repetition_counts if repetition_counts is not None else {}
         self.last_move = last_move
+        self._max_ply = max_ply if max_ply is not None else MAX_GAME_PLY
         self._encoding = None  # 缓存
         self._legal_mask = None  # 缓存
 
@@ -90,16 +93,19 @@ class GameState:
         """浅拷贝（board 是 numpy 数组，apply 时会 copy）"""
         return GameState(
             self.board, self.turn, self.move_count,
-            self.no_capture_count, self.repetition_counts, self.last_move
+            self.no_capture_count, self.repetition_counts, self.last_move,
+            max_ply=self._max_ply,
         )
 
     @classmethod
-    def new_game(cls) -> 'GameState':
+    def new_game(cls, max_ply: int = None) -> 'GameState':
         """创建初始棋盘状态"""
+        if max_ply is None:
+            max_ply = MAX_GAME_PLY
         board = create_initial_board()
         key = position_key(board, True)
         counts = {key: 1}
-        return cls(board, True, 0, 0, counts, None)
+        return cls(board, True, 0, 0, counts, None, max_ply=max_ply)
 
     # ── 走法查询 ──
 
@@ -181,6 +187,7 @@ class GameState:
             no_capture_count=new_no_capture,
             repetition_counts=new_counts,
             last_move=move,
+            max_ply=self._max_ply,
         )
 
     # ── 终局检测 ──
@@ -207,7 +214,7 @@ class GameState:
             return GameResult(None, "repetition")
 
         # 3. 检查最大步数
-        if self.move_count >= MAX_GAME_PLY:
+        if self.move_count >= self._max_ply:
             return GameResult(None, "max_ply")
 
         # 4. 检查无合法走法（困毙）
@@ -271,14 +278,13 @@ class GameState:
           0-6:  己方棋子位 (王..兵)
           7-13: 对方棋子位
           14:   己方颜色标记 (全1)
-          15:   总步数 / MAX_GAME_PLY
+          15:   总步数 / max_ply
           16:   无吃子步数 / 60
           17:   将军标记
         """
         if self._encoding is not None:
             return self._encoding
 
-        from .constants import MAX_GAME_PLY
         encoded = np.zeros((18, ROWS, COLS), dtype=np.float32)
 
         my_sign = 1 if self.turn else -1
@@ -299,7 +305,8 @@ class GameState:
         encoded[14] = 1.0
 
         # 步数归一化
-        encoded[15] = min(self.move_count, MAX_GAME_PLY) / MAX_GAME_PLY
+        mp = self._max_ply
+        encoded[15] = min(self.move_count, mp) / mp
         encoded[16] = min(self.no_capture_count, 60) / 60.0
 
         # 将军标记

@@ -15,7 +15,7 @@ INPUT_CHANNELS: int = 18
 WDL_SIZE: int = 3
 
 # ── 游戏规则 ──
-MAX_GAME_PLY: int = 300
+MAX_GAME_PLY: int = 512
 REPETITION_LIMIT: int = 3
 
 # ── 棋子编码 (int8) ──

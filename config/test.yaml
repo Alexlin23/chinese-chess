@@ -10,6 +10,7 @@ mcts:
   dirichlet_alpha: 0.3
   dirichlet_epsilon: 0.25
   batch_size: 800
+  virtual_loss: 3.0
 
 self_play:
   games: 2500             # 测试用，减少每轮游戏数
@@ -25,7 +26,7 @@ training:
   replay_buffer: 1000000
   samples_per_epoch: 100000
   capture_reward: 0.3
-  non_terminal_base_weight: 0.001
+  non_terminal_base_weight: 1.0
   terminal_weight: 2.0
 
 arena:
