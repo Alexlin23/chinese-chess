@@ -483,7 +483,59 @@ document.getElementById("btn-restart").addEventListener("click", () => {
 });
 
 // ============================================================
-//  AI 走棋
+//  启发式 AI 走棋（纯子力估值，不依赖神经网络）
+// ============================================================
+document.getElementById("btn-heuristic").addEventListener("click", async () => {
+  if (gameOver) return;
+  if (!gameSessionId) return;
+
+  const btn = document.getElementById("btn-heuristic");
+  btn.disabled = true;
+  const origText = btn.textContent;
+  btn.textContent = "思考中...";
+
+  try {
+    const resp = await fetch("/api/heuristic-move", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        board,
+        turn,
+        from_pos: { row: 0, col: 0 },
+        to_pos: { row: 0, col: 0 },
+      }),
+    });
+
+    if (!resp.ok) {
+      const err = await resp.json();
+      msgEl.textContent = "启发式AI无法走棋: " + (err.detail || "未知错误");
+      return;
+    }
+
+    const data = await resp.json();
+    console.log("Heuristic move:", data.from_pos, "->", data.to_pos);
+    await doMove(data.from_pos.row, data.from_pos.col,
+                 data.to_pos.row, data.to_pos.col);
+  } catch (err) {
+    console.error("Heuristic AI error:", err);
+    msgEl.textContent = "启发式AI调用失败";
+  } finally {
+    btn.disabled = false;
+    btn.textContent = origText;
+  }
+});
+
+// 快捷键: 按 H 让启发式 AI 走一步
+document.addEventListener("keydown", (e) => {
+  if (e.key === "h" || e.key === "H") {
+    if (!e.ctrlKey && !e.metaKey && document.activeElement === document.body) {
+      document.getElementById("btn-heuristic").click();
+    }
+  }
+});
+
+// ============================================================
+//  AI 走棋（神经网络 MCTS）
 // ============================================================
 document.getElementById("btn-ai").addEventListener("click", async () => {
   if (gameOver) return;
@@ -601,6 +653,7 @@ document.getElementById("btn-ai-vs-ai").addEventListener("click", async () => {
   aiVsAiRunning = true;
   document.getElementById("btn-ai-vs-ai").style.display = "none";
   document.getElementById("btn-ai-vs-ai-stop").style.display = "";
+  document.getElementById("btn-heuristic").disabled = true;
   document.getElementById("btn-ai").disabled = true;
   document.getElementById("btn-undo").disabled = true;
   document.getElementById("btn-restart").disabled = true;
@@ -647,6 +700,7 @@ function stopAiVsAi() {
   }
   document.getElementById("btn-ai-vs-ai").style.display = "";
   document.getElementById("btn-ai-vs-ai-stop").style.display = "none";
+  document.getElementById("btn-heuristic").disabled = false;
   document.getElementById("btn-ai").disabled = false;
   document.getElementById("btn-undo").disabled = false;
   document.getElementById("btn-restart").disabled = false;

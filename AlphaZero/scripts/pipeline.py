@@ -435,6 +435,9 @@ def pipeline(config: AlphaZeroConfig,
 
 if __name__ == "__main__":
     mp.set_start_method('spawn', force=True)
+    # Windows 默认 GBK 编码，无法输出 ✓ 等 Unicode 字符
+    if hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
     p = argparse.ArgumentParser(description="AlphaZero 并行训练管道")
     p.add_argument("--config", type=str, default="config/default.yaml",

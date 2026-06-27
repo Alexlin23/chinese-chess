@@ -25,6 +25,7 @@ import sys as _sys
 from pathlib import Path as _Path
 _sys.path.insert(0, str(_Path(__file__).parent.parent))
 from AlphaZero.engine import GameState as _AlphaGameState
+from AlphaZero.engine.heuristic import heuristic_move as _heuristic_move
 from AlphaZero.search import MCTS as _AlphaMCTS
 from AlphaZero.model import PolicyWDLEncoder as _PolicyWDLNet, NeuralEvaluator as _NeuralEval
 
@@ -244,6 +245,28 @@ def api_ai_move(req: MoveRequest):
     move, _ = neural_mcts.select_move(state, temperature=0.0)
     if move is None:
         raise HTTPException(status_code=400, detail="AI找不到合法走法")
+
+    return {
+        "from_pos": {"row": move.from_row, "col": move.from_col},
+        "to_pos": {"row": move.to_row, "col": move.to_col},
+    }
+
+
+@app.post("/api/heuristic-move")
+def api_heuristic_move(req: MoveRequest):
+    """启发式AI走棋：基于纯子力估值，只算当前最优吃子/保子。
+
+    不依赖神经网络，始终可用，速度极快（<1ms）。
+    请求体格式与 /api/ai-move 一致。
+
+    返回: {from_pos, to_pos} 可直接传递给 /api/move 走棋。
+    """
+    board = _parse_board(req.board)
+    state = _board_to_gamestate(board, req.turn)
+
+    move = _heuristic_move(state)
+    if move is None:
+        raise HTTPException(status_code=400, detail="启发式AI找不到合法走法")
 
     return {
         "from_pos": {"row": move.from_row, "col": move.from_col},

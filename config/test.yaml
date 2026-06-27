@@ -1,30 +1,30 @@
-# 测试配置 — 基于 default，只改 games 和 iterations
+# 测试配置 — 轻量级，低内存压力用于快速验证
 
 model:
   blocks: 20
   filters: 256
 
 mcts:
-  simulations: 800
+  simulations: 100           # 100次模拟，大幅减少搜索开销
   c_puct: 1.5
   dirichlet_alpha: 0.3
   dirichlet_epsilon: 0.25
-  batch_size: 128
+  batch_size: 32             # 配合低模拟数，减少batch
   virtual_loss: 3.0
 
 self_play:
-  games: 2500             # 测试用，减少每轮游戏数
-  max_ply: 512
+  games: 20                  # 每轮仅20局，控制内存
+  max_ply: 150               # 单局最大150步
   temperature_ply: 30
 
 training:
-  batch_size: 4096
+  batch_size: 512            # 减小batch，降低GPU内存需求
   lr: 0.2
   lr_momentum: 0.9
   weight_decay: 0.0001
-  epochs: 10
-  replay_buffer: 1000000
-  samples_per_epoch: 100000
+  epochs: 3                  # 少量epoch，避免小数据过拟合
+  replay_buffer: 100000      # 缩小回放池，匹配小规模对局
+  samples_per_epoch: 20000   # 每epoch采样数相应减少
   capture_reward: 0.3
   non_terminal_base_weight: 1.0
   terminal_weight: 2.0
@@ -33,15 +33,15 @@ training:
 warmup:
   win_rate_threshold: 0.6
   eval_games: 20
-  max_iterations: 10          # 测试用，快速切换
+  max_iterations: 10
 
 arena:
-  games: 40              # 快速验证（原10局统计噪声太大）
-  threshold: 0.52        # 略高于50%，避免纯噪声晋升
+  games: 40
+  threshold: 0.50            # 50%胜率即可晋升（快速验证用）
 
 parallel:
-  workers: null
-  inference_batch: 256
+  workers: 4                 # 限制worker数，降低内存压力
+  inference_batch: 128       # 减小推理batch
   inference_wait_ms: 10
 
 system:
@@ -51,4 +51,4 @@ system:
   monitor_interval: 5
 
 pipeline:
-  max_iterations: 10      # 测试用，减少轮次
+  max_iterations: 10

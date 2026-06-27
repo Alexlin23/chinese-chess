@@ -81,7 +81,7 @@ class AlphaZeroConfig:
     def from_yaml(cls, path: str) -> 'AlphaZeroConfig':
         """从 YAML 文件加载配置"""
         import yaml
-        with open(path, 'r') as f:
+        with open(path, 'r', encoding='utf-8') as f:
             data = yaml.safe_load(f)
 
         config = cls()
