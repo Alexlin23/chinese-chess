@@ -174,40 +174,42 @@ def pipeline(config: AlphaZeroConfig,
         num_filters=config.num_filters,
     ).to(device)
     start = 0
+    loaded_from = None  # 记录加载来源
 
+    # 决定从哪个 checkpoint 加载
     if resume is not None:
-        # 支持 --resume 或 --resume path
-        if resume == '':
-            # 自动从 best.pt 继续
-            resume_path = str(out / "best.pt")
-            if not Path(resume_path).exists():
-                resume_path = str(out / "latest.pt")
-        else:
-            resume_path = resume
-        
-        if Path(resume_path).exists():
-            ck = torch.load(resume_path, map_location=device, weights_only=False)
-            model.load_state_dict(ck['model_state_dict'])
-            # 从文件名推断轮次：iter049.pt → 50, best.pt/latest.pt → 0
-            fname = Path(resume_path).stem
-            if fname.startswith('iter'):
-                try:
-                    start = int(fname[4:]) + 1
-                except (ValueError, IndexError):
-                    start = 0
-            else:
-                start = 0
-            print(f"恢复训练: {resume_path} (从第 {start} 轮继续)")
-        else:
-            print(f"⚠ 未找到 checkpoint: {resume_path}，从头开始")
+        # 显式指定 --resume path
+        resume_path = str(out / "best.pt") if resume == '' else resume
     elif checkpoint:
-        ck = torch.load(checkpoint, map_location=device, weights_only=False)
+        resume_path = checkpoint
+    else:
+        # 默认：没有显式指定 → 自动检测 best.pt
+        best_path = str(out / "best.pt")
+        if Path(best_path).exists():
+            resume_path = best_path
+        else:
+            resume_path = None
+        if resume_path is None:
+            print("未找到已有模型，从头开始训练（随机初始化参数）")
+
+    if resume_path and Path(resume_path).exists():
+        ck = torch.load(resume_path, map_location=device, weights_only=False)
         model.load_state_dict(ck['model_state_dict'])
-        print(f"加载 checkpoint: {checkpoint}")
+        loaded_from = resume_path
+        # 从文件名推断轮次：iter049.pt → 50, best.pt/latest.pt → 0
+        fname = Path(resume_path).stem
+        if fname.startswith('iter'):
+            try:
+                start = int(fname[4:]) + 1
+            except (ValueError, IndexError):
+                start = 0
+        print(f"恢复训练: {resume_path} (从第 {start} 轮继续)")
+    elif resume_path:
+        print(f"⚠ 未找到 checkpoint: {resume_path}，从头开始")
 
     replay = ReplayBuffer(max_size=config.replay_buffer_size)
     trainer = Trainer(config, device)
-    if resume or checkpoint:
+    if loaded_from:
         trainer.model.load_state_dict(model.state_dict())
 
     arena = Arena(config, device)
@@ -367,7 +369,7 @@ if __name__ == "__main__":
                    help="YAML 配置文件路径")
     p.add_argument("--checkpoint", type=str, default=None)
     p.add_argument("--resume", type=str, nargs='?', const='', default=None,
-                   help="从 checkpoint 继续训练。不指定路径则自动从 best.pt 继续")
+                   help="显式指定 checkpoint 路径。不指定则自动检测 best.pt")
     p.add_argument("--output", type=str, default=None)
     p.add_argument("--iterations", type=int, default=None)
     p.add_argument("--workers", type=int, default=None, help="覆盖配置文件中的 workers")
