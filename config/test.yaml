@@ -9,7 +9,7 @@ mcts:
   c_puct: 1.5
   dirichlet_alpha: 0.3
   dirichlet_epsilon: 0.25
-  batch_size: 800
+  batch_size: 128
   virtual_loss: 3.0
 
 self_play:
@@ -30,12 +30,12 @@ training:
   terminal_weight: 2.0
 
 arena:
-  games: 10              # 快速验证
-  threshold: 0.50        # 只要不输就晋升
+  games: 40              # 快速验证（原10局统计噪声太大）
+  threshold: 0.52        # 略高于50%，避免纯噪声晋升
 
 parallel:
   workers: null
-  inference_batch: 800
+  inference_batch: 256
   inference_wait_ms: 10
 
 system:

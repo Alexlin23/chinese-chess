@@ -13,7 +13,7 @@ mcts:
   c_puct: 1.5             # PUCT探索系数
   dirichlet_alpha: 0.3    # Dirichlet噪声浓度
   dirichlet_epsilon: 0.25 # 噪声混合比例
-  batch_size: 800         # = simulations，一轮完成
+  batch_size: 128         # 分批推理，平衡GPU利用率和post时间
   virtual_loss: 3.0       # 虚拟损失，防止batch内重复选路径
 
 # ── 自我对弈 ──

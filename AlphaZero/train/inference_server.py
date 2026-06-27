@@ -153,7 +153,6 @@ class InferenceServer:
                 t_forward = time.perf_counter() - t0
 
                 t0 = time.perf_counter()
-                p_logits = p_logits.clone()
                 p_logits[~mask_tensor] = float('-inf')
                 policy_probs = torch.softmax(p_logits, dim=1).cpu().numpy()
                 wdl_probs = torch.softmax(w_logits, dim=1).cpu().numpy()
