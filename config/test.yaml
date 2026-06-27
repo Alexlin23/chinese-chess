@@ -22,8 +22,8 @@ training:
   lr: 0.2
   lr_momentum: 0.9
   weight_decay: 0.0001
-  epochs: 3                  # 少量epoch，避免小数据过拟合
-  replay_buffer: 100000      # 缩小回放池，匹配小规模对局
+  epochs: 8                  # 充足epoch，让模型充分学习回放池数据
+  replay_buffer: 30000       # 缩小回放池，避免大数组分配失败（~930MB）
   samples_per_epoch: 20000   # 每epoch采样数相应减少
   capture_reward: 0.3
   non_terminal_base_weight: 1.0
@@ -33,16 +33,16 @@ training:
 warmup:
   win_rate_threshold: 0.6
   eval_games: 20
-  max_iterations: 10
+  max_iterations: 50          # 充足冷启动时间，让模型有机会学到超过启发式
 
 arena:
   games: 40
   threshold: 0.50            # 50%胜率即可晋升（快速验证用）
 
 parallel:
-  workers: 4                 # 限制worker数，降低内存压力
-  inference_batch: 128       # 减小推理batch
-  inference_wait_ms: 10
+  workers: 8                 # 8 worker 匹配 16 逻辑核，充分喂饱 GPU
+  inference_batch: 256       # 扩大预分配 buffer，单次 forward 吞吐更大
+  inference_wait_ms: 5       # 减少等待，加快轮转
 
 system:
   checkpoint_dir: "AlphaZero/checkpoints"
@@ -51,4 +51,4 @@ system:
   monitor_interval: 5
 
 pipeline:
-  max_iterations: 10
+  max_iterations: 100

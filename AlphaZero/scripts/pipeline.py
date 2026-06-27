@@ -6,6 +6,7 @@
 """
 import sys
 import os
+import gc
 import time
 import argparse
 from pathlib import Path
@@ -252,7 +253,6 @@ def pipeline(config: AlphaZeroConfig,
     elif resume_path:
         print(f"⚠ 未找到 checkpoint: {resume_path}，从头开始")
 
-    replay = ReplayBuffer(max_size=config.replay_buffer_size)
     trainer = Trainer(config, device)
     if loaded_from:
         trainer.model.load_state_dict(model.state_dict())
@@ -313,7 +313,12 @@ def pipeline(config: AlphaZeroConfig,
         # 更新监控
         monitor.update(iteration=it+1, phase='self_play')
 
-        # 并行自对弈
+        # 并行自对弈（释放上一轮 replay_buffer 避免碎片化）
+        try:
+            del replay
+            gc.collect()
+        except NameError:
+            pass
         games_per_worker = max(1, config.games_per_iteration // num_workers)
         replay = parallel_self_play(
             config=config,
