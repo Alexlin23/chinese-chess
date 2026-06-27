@@ -188,8 +188,16 @@ def pipeline(config: AlphaZeroConfig,
         if Path(resume_path).exists():
             ck = torch.load(resume_path, map_location=device, weights_only=False)
             model.load_state_dict(ck['model_state_dict'])
-            start = ck.get('iteration', 0) + 1
-            print(f"恢复训练: {resume_path} (iteration {start})")
+            # 从文件名推断轮次：iter049.pt → 50, best.pt/latest.pt → 0
+            fname = Path(resume_path).stem
+            if fname.startswith('iter'):
+                try:
+                    start = int(fname[4:]) + 1
+                except (ValueError, IndexError):
+                    start = 0
+            else:
+                start = 0
+            print(f"恢复训练: {resume_path} (从第 {start} 轮继续)")
         else:
             print(f"⚠ 未找到 checkpoint: {resume_path}，从头开始")
     elif checkpoint:
@@ -280,7 +288,7 @@ def pipeline(config: AlphaZeroConfig,
         candidate_path = str(out / f"iter{it:03d}.pt")
         torch.save({
             'model_state_dict': model.state_dict(),
-            'iteration': it, 'config': config.to_dict(),
+            'config': config.to_dict(),
             'stats': stats,
         }, candidate_path)
 
@@ -292,7 +300,7 @@ def pipeline(config: AlphaZeroConfig,
             arena_result = {'wins': 0, 'losses': 0, 'draws': 0,
                            'score_rate': 1.0, 'should_promote': True}
             torch.save({'model_state_dict': model.state_dict(),
-                        'iteration': it, 'config': config.to_dict()},
+                       'config': config.to_dict()},
                        best_model_path)
         else:
             print(f"  Arena: {config.arena_games} 局 vs 旧模型...")
@@ -318,7 +326,7 @@ def pipeline(config: AlphaZeroConfig,
                 print(f"  ✓ 晋升")
                 total_promoted += 1
                 torch.save({'model_state_dict': model.state_dict(),
-                            'iteration': it, 'config': config.to_dict()},
+                            'config': config.to_dict()},
                            best_model_path)
             else:
                 print(f"  ✗ 回滚")
@@ -337,7 +345,7 @@ def pipeline(config: AlphaZeroConfig,
         })
 
         torch.save({'model_state_dict': model.state_dict(),
-                    'iteration': it, 'config': config.to_dict()},
+                    'config': config.to_dict()},
                    str(out / "latest.pt"))
 
     # 停止监控

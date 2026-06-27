@@ -196,7 +196,6 @@ class Trainer:
             'model_state_dict': self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
             'scheduler_state_dict': self.scheduler.state_dict(),
-            'iteration': self.current_iteration,
             'config': self.config.to_dict(),
             'train_losses': self.train_losses,
             'policy_losses': self.policy_losses,
@@ -226,10 +225,9 @@ class Trainer:
             except (KeyError, ValueError, RuntimeError):
                 pass
 
-        self.current_iteration = state.get('iteration', 0)
         self.train_losses = state.get('train_losses', [])
         self.policy_losses = state.get('policy_losses', [])
         self.wdl_losses = state.get('wdl_losses', [])
 
-        print(f"加载 checkpoint: {path} (iteration {self.current_iteration})")
+        print(f"加载 checkpoint: {path}")
         return state
