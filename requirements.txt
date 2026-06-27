@@ -1,0 +1,10 @@
+# AlphaZero 中国象棋训练 — 运行时依赖
+#
+# 注意: PyTorch 建议通过官方命令安装，确保 CUDA 支持:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+#   (根据你的 CUDA 版本选择 cu118/cu121/cu124)
+
+torch>=2.0
+numpy>=1.24
+PyYAML>=6.0
+psutil>=5.0
