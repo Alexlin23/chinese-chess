@@ -29,6 +29,12 @@ training:
   non_terminal_base_weight: 1.0
   terminal_weight: 2.0
 
+# ── 冷启动 ──
+warmup:
+  win_rate_threshold: 0.6
+  eval_games: 20
+  max_iterations: 10          # 测试用，快速切换
+
 arena:
   games: 40              # 快速验证（原10局统计噪声太大）
   threshold: 0.52        # 略高于50%，避免纯噪声晋升

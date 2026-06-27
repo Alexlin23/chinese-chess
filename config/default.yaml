@@ -35,6 +35,12 @@ training:
   non_terminal_base_weight: 1.0    # 非终局位置基础权重（冷启动期和棋是主要信号）
   terminal_weight: 2.0    # 终局位置权重
 
+# ── 冷启动 ──
+warmup:
+  win_rate_threshold: 0.6    # 对启发式胜率阈值
+  eval_games: 20             # 每轮评估局数
+  max_iterations: 50         # 最多用启发式训练轮数
+
 # ── Arena 评估 ──
 arena:
   games: 400              # 评估对局数 (AlphaZero原版400)

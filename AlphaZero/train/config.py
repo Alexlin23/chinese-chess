@@ -61,6 +61,11 @@ class AlphaZeroConfig:
     save_interval: int = 1
     monitor_interval: float = 5.0
 
+    # ── 冷启动 ──
+    warmup_win_rate: float = 0.6         # 对启发式胜率超此值切换自对弈
+    warmup_eval_games: int = 20          # 每轮评估局数
+    warmup_max_iterations: int = 50      # 最多用启发式训练多少轮，超过强制切换
+
     # ── 训练循环 ──
     max_iterations: int = 100
 
@@ -132,6 +137,12 @@ class AlphaZeroConfig:
             config.log_interval = data['system'].get('log_interval', config.log_interval)
             config.save_interval = data['system'].get('save_interval', config.save_interval)
             config.monitor_interval = data['system'].get('monitor_interval', config.monitor_interval)
+
+        # 冷启动
+        if 'warmup' in data:
+            config.warmup_win_rate = data['warmup'].get('win_rate_threshold', config.warmup_win_rate)
+            config.warmup_eval_games = data['warmup'].get('eval_games', config.warmup_eval_games)
+            config.warmup_max_iterations = data['warmup'].get('max_iterations', config.warmup_max_iterations)
 
         # 训练循环
         if 'pipeline' in data:

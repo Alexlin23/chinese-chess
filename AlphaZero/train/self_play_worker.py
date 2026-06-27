@@ -18,6 +18,7 @@ sys.path.insert(0, str(_project_root))
 from AlphaZero.engine import GameState, RED, BLACK
 from AlphaZero.engine.move import ActionEncoder
 from AlphaZero.engine.constants import POLICY_SIZE
+from AlphaZero.engine.heuristic import heuristic_move
 from AlphaZero.train.config import AlphaZeroConfig
 from AlphaZero.train.inference_server import BatchRequest, BatchResponse
 
@@ -78,6 +79,7 @@ def self_play_worker_fn(
     response_queue: Queue,
     result_queue: Queue,
     stop_event: Event,
+    opponent_mode: str = 'self',
 ):
     """Self-Play Worker 主函数"""
     from AlphaZero.search import MCTS
@@ -104,22 +106,34 @@ def self_play_worker_fn(
 
         state = GameState.new_game(max_ply=config.max_game_ply)
         positions = []
+        ai_is_red = (game_idx % 2 == 0)  # AI交替执红，避免颜色偏差
 
         while not state.is_terminal() and state.move_count < config.max_game_ply:
             if stop_event.is_set():
                 break
 
-            temperature = 1.0 if state.move_count < config.temperature_ply else 0.1
+            is_ai_turn = (state.turn == ai_is_red)
 
-            move, policy = mcts.select_move(state, temperature=temperature)
-            if move is None:
-                break
-
-            # 检查是否吃子
-            captured = state.board[move.to_row][move.to_col] is not None
-
-            positions.append((state.encode(), policy.copy(), state.turn, captured))
-            state = state.apply(move)
+            if opponent_mode == 'heuristic' and not is_ai_turn:
+                # 启发式走棋 → one-hot policy
+                move = heuristic_move(state)
+                if move is None:
+                    break
+                action_idx = ActionEncoder.encode(move)
+                policy = np.zeros(POLICY_SIZE, dtype=np.float32)
+                policy[action_idx] = 1.0
+                captured = state.board[move.to_row][move.to_col] is not None
+                positions.append((state.encode(), policy, state.turn, captured))
+                state = state.apply(move)
+            else:
+                # AI走棋 → MCTS分布式policy
+                temperature = 1.0 if state.move_count < config.temperature_ply else 0.1
+                move, policy = mcts.select_move(state, temperature=temperature)
+                if move is None:
+                    break
+                captured = state.board[move.to_row][move.to_col] is not None
+                positions.append((state.encode(), policy.copy(), state.turn, captured))
+                state = state.apply(move)
 
         # 终局结果
         result = state.game_result()

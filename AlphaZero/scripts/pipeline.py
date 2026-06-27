@@ -26,7 +26,51 @@ from AlphaZero.train.arena import Arena
 from AlphaZero.train.inference_server import InferenceServer
 from AlphaZero.train.self_play_worker import self_play_worker_fn
 from AlphaZero.train.monitor import monitor
-from AlphaZero.engine import GameState, RED, BLACK
+from AlphaZero.engine import GameState, RED, BLACK, ActionEncoder
+
+
+def evaluate_vs_heuristic(model: PolicyWDLEncoder,
+                          config: AlphaZeroConfig,
+                          num_games: int,
+                          device: str) -> float:
+    """纯网络（温度=0，不用MCTS）快速评估AI vs 启发式胜率。
+
+    Returns:
+        AI胜率 [0, 1]，平局计 0.5。
+    """
+    from AlphaZero.engine.heuristic import heuristic_move
+
+    neural_eval = NeuralEvaluator(model, device)
+    ai_score = 0.0
+
+    for i in range(num_games):
+        state = GameState.new_game(max_ply=config.max_game_ply)
+        ai_is_red = (i % 2 == 0)
+
+        while not state.is_terminal():
+            is_ai_turn = (state.turn == ai_is_red)
+
+            if is_ai_turn:
+                # 纯网络 argmax，temperature=0，不用 MCTS
+                policy_probs, _ = neural_eval.evaluate(state)
+                best_action = int(np.argmax(policy_probs))
+                move = ActionEncoder.decode(best_action)
+            else:
+                move = heuristic_move(state)
+
+            if move is None:
+                break
+            state = state.apply(move)
+
+        result = state.game_result()
+        if result is not None:
+            if result.is_draw:
+                ai_score += 0.5
+            elif (ai_is_red and result.winner == RED) or \
+                 (not ai_is_red and result.winner == BLACK):
+                ai_score += 1.0
+
+    return ai_score / num_games
 
 
 def parallel_self_play(config: AlphaZeroConfig,
@@ -34,6 +78,7 @@ def parallel_self_play(config: AlphaZeroConfig,
                        num_workers: int,
                        games_per_worker: int,
                        device: str = 'cuda',
+                       opponent_mode: str = 'self',
                        verbose: bool = True) -> ReplayBuffer:
     """多进程并行自对弈"""
     server = InferenceServer(
@@ -56,7 +101,7 @@ def parallel_self_play(config: AlphaZeroConfig,
             target=self_play_worker_fn,
             args=(i, config, games_per_worker,
                   server.request_queue, server.response_queues[i],
-                  result_queue, stop_event),
+                  result_queue, stop_event, opponent_mode),
             daemon=True,
         )
         p.start()
@@ -239,6 +284,7 @@ def pipeline(config: AlphaZeroConfig,
     print(f"Iterations: {max_iterations}")
     print(f"每轮: {config.games_per_iteration} 局自对弈 + {config.epochs_per_iteration} epochs")
     print(f"Arena: {config.arena_games} 局, 晋升阈值 {config.promotion_score_rate}")
+    print(f"冷启动: vs启发式 {config.warmup_eval_games}局/轮, 阈值 {config.warmup_win_rate:.0%}, 最多 {config.warmup_max_iterations} 轮")
     print(f"MCTS: {config.num_simulations} 模拟, c_puct={config.c_puct}")
     print(f"训练: batch={config.batch_size}, lr={config.learning_rate}")
     print(f"监控: {'开启' if enable_monitor else '关闭'}")
@@ -247,6 +293,7 @@ def pipeline(config: AlphaZeroConfig,
     total_start = time.perf_counter()
     history = []
     total_promoted = 0
+    opponent_mode = 'heuristic'  # 从启发式冷启动开始
 
     for it in range(start, start + max_iterations):
         ts = datetime.now().strftime("%H:%M:%S")
@@ -274,6 +321,7 @@ def pipeline(config: AlphaZeroConfig,
             num_workers=num_workers,
             games_per_worker=games_per_worker,
             device=device,
+            opponent_mode=opponent_mode,
         )
 
         # 更新监控
@@ -294,8 +342,32 @@ def pipeline(config: AlphaZeroConfig,
             'stats': stats,
         }, candidate_path)
 
-        # Arena 评估（第一轮直接晋升）
-        if it == start:
+        # ── 暖机评估 / Arena ──
+        if opponent_mode == 'heuristic':
+            # 暖机阶段：评估 vs 启发式，判断是否切换
+            win_rate = evaluate_vs_heuristic(
+                model, config,
+                num_games=config.warmup_eval_games,
+                device=device,
+            )
+            print(f"  vs启发式胜率: {win_rate:.1%} "
+                  f"(阈值: {config.warmup_win_rate:.1%}, "
+                  f"轮次: {it - start + 1}/{config.warmup_max_iterations})")
+
+            if win_rate >= config.warmup_win_rate \
+               or it - start + 1 >= config.warmup_max_iterations:
+                opponent_mode = 'self'
+                reason = "胜率达标" if win_rate >= config.warmup_win_rate else "超过最大轮数"
+                print(f"  ✓ 切换到自我对弈（{reason}）")
+
+            # 暖机阶段跳过 Arena，直接保存为 best
+            total_promoted += 1
+            arena_result = {'wins': 0, 'losses': 0, 'draws': 0,
+                           'score_rate': 1.0, 'should_promote': True}
+            torch.save({'model_state_dict': model.state_dict(),
+                       'config': config.to_dict()},
+                       best_model_path)
+        elif it == start:
             # 第一轮直接晋升，不做 Arena
             print(f"  ✓ 第一轮直接晋升")
             total_promoted += 1
