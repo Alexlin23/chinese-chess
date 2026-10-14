@@ -350,6 +350,9 @@ def pipeline(config: AlphaZeroConfig,
             opponent_mode=opponent_mode,
             replay=replay,
         )
+        # Commit completed games before training, so a training crash does
+        # not discard self-play data already accepted by the parent process.
+        replay.save(replay_path)
 
         # 更新监控
         monitor.update(phase='training', loss=None)
@@ -436,7 +439,6 @@ def pipeline(config: AlphaZeroConfig,
         torch.save({'model_state_dict': model.state_dict(),
                     'config': config.to_dict()},
                    str(out / "latest.pt"))
-        replay.save(replay_path)
         trainer.save_checkpoint(str(training_state_path),
                                 extra={'opponent_mode': opponent_mode,
                                        'last_completed_iteration': it})

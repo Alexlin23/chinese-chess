@@ -22,7 +22,8 @@ class PackedSample:
 
     @property
     def nbytes(self):
-        return len(self.board) + self.actions.nbytes + self.probabilities.nbytes + 32
+        # Include a conservative allowance for Python objects and deque refs.
+        return len(self.board) + self.actions.nbytes + self.probabilities.nbytes + 256
 
 
 def pack_sample(state: GameState, policy: np.ndarray,
@@ -33,10 +34,13 @@ def pack_sample(state: GameState, policy: np.ndarray,
     actions = np.flatnonzero(policy > 0).astype(np.uint16)
     if len(actions) == 0:
         raise ValueError("policy has no positive action")
+    probabilities = policy[actions].astype(np.float16)
+    if probabilities.sum(dtype=np.float32) <= 0:
+        raise ValueError("policy underflows float16 storage")
     return PackedSample(
         np.asarray(state.board, dtype=np.int8).tobytes(), bool(state.turn),
         int(state.move_count), int(state.no_capture_count), int(state._max_ply),
-        actions, policy[actions].astype(np.float16), int(np.argmax(wdl)), float(weight))
+        actions, probabilities, int(np.argmax(wdl)), float(weight))
 
 
 class ReplayBuffer:

@@ -11,7 +11,7 @@ def test_compact_sample_roundtrip_and_budget(tmp_path):
     policy = np.zeros(POLICY_SIZE, dtype=np.float32)
     policy[actions[:2]] = [0.25, 0.75]
     sample = pack_sample(state, policy, np.array([1, 0, 0]), 2.0)
-    assert sample.nbytes < 256
+    assert sample.nbytes < 512
     replay = ReplayBuffer(max_size=100, max_bytes=sample.nbytes * 2)
     for _ in range(3):
         replay.add_packed(sample)
@@ -29,3 +29,9 @@ def test_compact_sample_roundtrip_and_budget(tmp_path):
     assert len(restored) == 2
     assert restored.byte_size == replay.byte_size
     np.testing.assert_array_equal(restored.sample(1)[0][0], state.encode())
+
+
+def test_empty_replay_can_be_saved_and_loaded(tmp_path):
+    path = tmp_path / "empty.npz"
+    ReplayBuffer().save(path)
+    assert len(ReplayBuffer.load(path)) == 0
