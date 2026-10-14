@@ -63,5 +63,6 @@ system:
 
 # ── 训练循环 ──
 pipeline:
+  mode: self              # 纯自博弈；启发式辅助实验需显式改为 heuristic
   max_iterations: 100     # 总迭代次数
 

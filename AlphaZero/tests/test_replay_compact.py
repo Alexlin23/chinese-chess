@@ -1,5 +1,6 @@
 """Compact replay keeps a byte budget and round-trips without pickle."""
 import numpy as np
+import pytest
 from AlphaZero.engine.constants import POLICY_SIZE
 from AlphaZero.engine.state import GameState
 from AlphaZero.train.replay import ReplayBuffer, pack_sample
@@ -35,3 +36,5 @@ def test_empty_replay_can_be_saved_and_loaded(tmp_path):
     path = tmp_path / "empty.npz"
     ReplayBuffer().save(path)
     assert len(ReplayBuffer.load(path)) == 0
+    with pytest.raises(ValueError, match="experiment mode"):
+        ReplayBuffer.load(path, experiment_mode='heuristic')

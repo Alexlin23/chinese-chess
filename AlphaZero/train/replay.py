@@ -47,10 +47,14 @@ class ReplayBuffer:
     """FIFO replay bounded by sample count and stored bytes."""
 
     def __init__(self, max_size: int = 100_000,
-                 max_bytes: int = 512 * 1024 * 1024):
+                 max_bytes: int = 512 * 1024 * 1024,
+                 experiment_mode: str = 'self'):
         if max_size < 1 or max_bytes < 1:
             raise ValueError("replay limits must be positive")
         self.max_size, self.max_bytes = max_size, max_bytes
+        if experiment_mode not in ('self', 'heuristic'):
+            raise ValueError("invalid experiment mode")
+        self.experiment_mode = experiment_mode
         self.samples = deque()
         self.byte_size = 0
 
@@ -117,6 +121,7 @@ class ReplayBuffer:
                 probabilities=np.concatenate([s.probabilities for s in items]) if items else np.array([], dtype=np.float16),
                 wdl_indices=np.asarray([s.wdl_index for s in items], dtype=np.uint8),
                 weights=np.asarray([s.weight for s in items], dtype=np.float32),
+                experiment_mode=np.asarray(self.experiment_mode),
             )
             out.flush()
             os.fsync(out.fileno())
@@ -124,9 +129,12 @@ class ReplayBuffer:
 
     @classmethod
     def load(cls, path: str, max_size: int = 100_000,
-             max_bytes: int = 512 * 1024 * 1024):
-        buffer = cls(max_size, max_bytes)
+             max_bytes: int = 512 * 1024 * 1024,
+             experiment_mode: str = 'self'):
+        buffer = cls(max_size, max_bytes, experiment_mode)
         with np.load(path, allow_pickle=False) as data:
+            if str(data['experiment_mode']) != experiment_mode:
+                raise ValueError("replay experiment mode does not match training mode")
             offsets = data['offsets']
             for i in range(len(data['turns'])):
                 lo, hi = int(offsets[i]), int(offsets[i + 1])

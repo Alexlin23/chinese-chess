@@ -70,6 +70,7 @@ class AlphaZeroConfig:
 
     # ── 训练循环 ──
     max_iterations: int = 100
+    experiment_mode: str = 'self'  # self 或 heuristic，实验结果须分开比较
 
     @property
     def checkpoint_path(self) -> Path:
@@ -151,6 +152,9 @@ class AlphaZeroConfig:
         # 训练循环
         if 'pipeline' in data:
             config.max_iterations = data['pipeline'].get('max_iterations', config.max_iterations)
+            config.experiment_mode = data['pipeline'].get('mode', config.experiment_mode)
+        if config.experiment_mode not in ('self', 'heuristic'):
+            raise ValueError("pipeline.mode must be 'self' or 'heuristic'")
 
         return config
 

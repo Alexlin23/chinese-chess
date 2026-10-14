@@ -123,7 +123,8 @@ def parallel_self_play(config: AlphaZeroConfig,
 
     if replay is None:
         replay = ReplayBuffer(max_size=config.replay_buffer_size,
-                              max_bytes=config.replay_buffer_max_bytes)
+                              max_bytes=config.replay_buffer_max_bytes,
+                              experiment_mode=opponent_mode)
     workers_done = 0
     total_stats = {'red': 0, 'black': 0, 'draw': 0, 'moves': 0, 'games': 0}
     t_start = time.perf_counter()
@@ -238,7 +239,6 @@ def pipeline(config: AlphaZeroConfig,
     loaded_from = None  # 记录加载来源
 
     training_state_path = out / "latest_training.pt"
-    replay_path = out / "replay.npz"
     # 决定从哪个 checkpoint 加载
     if resume is not None:
         # 显式指定 --resume path
@@ -312,16 +312,29 @@ def pipeline(config: AlphaZeroConfig,
     total_start = time.perf_counter()
     history = []
     total_promoted = 0
-    opponent_mode = (state.get('opponent_mode', 'self') if loaded_from
-                     else 'self')
+    opponent_mode = (state.get('opponent_mode', config.experiment_mode)
+                     if loaded_from else config.experiment_mode)
+    if opponent_mode not in ('self', 'heuristic'):
+        raise ValueError(f"unsupported experiment mode: {opponent_mode}")
+    replay_path = out / f"replay_{opponent_mode}.npz"
     replay = (ReplayBuffer.load(replay_path,
                                max_size=config.replay_buffer_size,
-                               max_bytes=config.replay_buffer_max_bytes)
+                               max_bytes=config.replay_buffer_max_bytes,
+                               experiment_mode=opponent_mode)
               if replay_path.exists() else
               ReplayBuffer(config.replay_buffer_size,
-                           config.replay_buffer_max_bytes))
+                           config.replay_buffer_max_bytes,
+                           opponent_mode))
 
     for it in range(start, start + max_iterations):
+        if replay.experiment_mode != opponent_mode:
+            replay_path = out / f"replay_{opponent_mode}.npz"
+            replay = (ReplayBuffer.load(
+                replay_path, config.replay_buffer_size,
+                config.replay_buffer_max_bytes, opponent_mode)
+                if replay_path.exists() else
+                ReplayBuffer(config.replay_buffer_size,
+                             config.replay_buffer_max_bytes, opponent_mode))
         ts = datetime.now().strftime("%H:%M:%S")
         model_path = str(out / "latest.pt")
 
