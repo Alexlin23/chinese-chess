@@ -28,7 +28,7 @@ def material_score(board: np.ndarray, is_red: bool) -> float:
         return float(black_total - red_total)
 
 
-def heuristic_move(state) -> object:
+def heuristic_move(state, rng=None) -> object:
     """选择子力得分最高的走法，同分时随机选择。
 
     Args:
@@ -55,4 +55,7 @@ def heuristic_move(state) -> object:
         elif abs(score - best_score) < 1e-6:
             best_moves.append(move)
 
+    if rng is not None:
+        return best_moves[int(rng.integers(len(best_moves)))]
     return random.choice(best_moves)
+
