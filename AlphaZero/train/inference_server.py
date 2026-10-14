@@ -10,6 +10,7 @@
 import os
 import sys
 import time
+from queue import Empty
 import torch
 import numpy as np
 import multiprocessing as mp
@@ -42,6 +43,7 @@ class BatchResponse:
     wdls: np.ndarray        # (N, 3) float32
     values: np.ndarray      # (N,) float32
     worker_id: int
+    error: Optional[str] = None
 
 
 class InferenceServer:
@@ -64,9 +66,9 @@ class InferenceServer:
         self.num_workers = num_workers
 
         # 进程间通信
-        self.request_queue = Queue(maxsize=num_workers * 100)
+        self.request_queue = Queue(maxsize=max(2, num_workers * 2))
         self.response_queues = {
-            i: Queue(maxsize=100) for i in range(num_workers)
+            i: Queue(maxsize=2) for i in range(num_workers)
         }
         self.stop_event = Event()
 
@@ -123,21 +125,49 @@ class InferenceServer:
         total_batches = 0
         t_start = time.perf_counter()
         t_log = time.perf_counter()
+        pending = None
 
         while not stop_event.is_set():
             # 收集批量请求
             try:
-                req: BatchRequest = request_queue.get(timeout=max_wait_ms / 1000)
-            except:
+                req = pending if pending is not None else request_queue.get(timeout=0.1)
+                pending = None
+            except Empty:
                 continue
 
             if req is None:
                 continue
 
+            requests = [req]
+            requested = len(req.states)
+            deadline = time.perf_counter() + max_wait_ms / 1000
+            while requested < batch_size and not stop_event.is_set():
+                remaining = deadline - time.perf_counter()
+                if remaining <= 0:
+                    break
+                try:
+                    next_req = request_queue.get(timeout=remaining)
+                except Empty:
+                    break
+                if next_req is None:
+                    continue
+                if requested + len(next_req.states) > batch_size:
+                    pending = next_req
+                    break
+                requests.append(next_req)
+                requested += len(next_req.states)
+
             try:
                 t0 = time.perf_counter()
-                states = req.states
-                masks_arr = req.masks
+                for item in requests:
+                    count = len(item.states)
+                    if (count < 1 or count > batch_size or
+                            item.states.shape != (count, INPUT_CHANNELS, 10, 9) or
+                            item.masks.shape != (count, POLICY_SIZE) or
+                            item.worker_id not in response_queues):
+                        raise ValueError("invalid inference request")
+                states = np.concatenate([item.states for item in requests])
+                masks_arr = np.concatenate([item.masks for item in requests])
                 n = len(states)
 
                 # 使用预分配 tensor（避免重复分配内存）
@@ -160,14 +190,18 @@ class InferenceServer:
                 t_post = time.perf_counter() - t0
 
                 t0 = time.perf_counter()
-                resp = BatchResponse(
-                    request_id=req.request_id,
-                    policies=policy_probs,
-                    wdls=wdl_probs,
-                    values=values,
-                    worker_id=req.worker_id,
-                )
-                response_queues[req.worker_id].put(resp)
+                offset = 0
+                for item in requests:
+                    count = len(item.states)
+                    resp = BatchResponse(
+                        request_id=item.request_id,
+                        policies=policy_probs[offset:offset + count],
+                        wdls=wdl_probs[offset:offset + count],
+                        values=values[offset:offset + count],
+                        worker_id=item.worker_id,
+                    )
+                    response_queues[item.worker_id].put(resp, timeout=30)
+                    offset += count
                 t_dist = time.perf_counter() - t0
 
                 total_requests += n
@@ -187,18 +221,21 @@ class InferenceServer:
 
             except Exception as e:
                 print(f"[InferenceServer] 推理错误: {e}")
-                # 返回均匀分布作为 fallback
-                n = len(req.states)
-                resp = BatchResponse(
-                    request_id=req.request_id,
-                    policies=np.ones((n, POLICY_SIZE), dtype=np.float32) / POLICY_SIZE,
-                    wdls=np.tile(np.array([0.33, 0.34, 0.33], dtype=np.float32), (n, 1)),
-                    values=np.zeros(n, dtype=np.float32),
-                    worker_id=req.worker_id,
-                )
-                response_queues[req.worker_id].put(resp)
+                for item in requests:
+                    if item.worker_id in response_queues:
+                        resp = BatchResponse(
+                            request_id=item.request_id, policies=None,
+                            wdls=None, values=None, worker_id=item.worker_id,
+                            error=repr(e),
+                        )
+                        try:
+                            response_queues[item.worker_id].put(resp, timeout=1)
+                        except Exception:
+                            pass
+                stop_event.set()
 
         elapsed = time.perf_counter() - t_start
         print(f"[InferenceServer] 停止: {total_requests} 请求, "
               f"{total_batches} batch, {elapsed:.0f}s, "
               f"{total_requests/max(elapsed,1):.0f} req/s")
+

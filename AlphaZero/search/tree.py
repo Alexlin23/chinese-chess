@@ -40,7 +40,8 @@ class MCTS:
         self.virtual_loss = virtual_loss
 
     def search(self, root_state: GameState,
-               temperature: float = 1.0) -> np.ndarray:
+               temperature: float = 1.0,
+               add_exploration_noise: bool = True) -> np.ndarray:
         """执行完整搜索，返回 (8100,) 策略分布。"""
         if root_state.is_terminal():
             return np.zeros(POLICY_SIZE, dtype=np.float32)
@@ -51,7 +52,7 @@ class MCTS:
 
         # 添加 Dirichlet 噪声到根节点
         legal_moves = root_state.legal_moves()
-        if len(legal_moves) > 1:
+        if add_exploration_noise and len(legal_moves) > 1:
             legal_actions = ActionEncoder.legal_actions(legal_moves)
             noise = np.random.dirichlet(
                 [self.dirichlet_alpha] * len(legal_actions)
@@ -70,10 +71,16 @@ class MCTS:
 
             # 1) 串行选择 batch_count 个叶节点
             leaves = []
+            pending_nodes = set()
             for _ in range(batch_count):
-                leaf = self._select_leaf(root, root_state)
+                leaf = self._select_leaf(root, root_state, pending_nodes)
                 if leaf is not None:
                     leaves.append(leaf)
+                    if not leaf[3]:
+                        pending_nodes.add(id(leaf[0]))
+                else:
+                    # No other leaf is available until this batch is expanded.
+                    break
 
             if not leaves:
                 break
@@ -107,7 +114,7 @@ class MCTS:
                     # _backup 从叶节点视角开始，自动交替翻转符号
                     self._backup(path, value, root)
 
-            sims_done += batch_count
+            sims_done += len(leaves)
 
         # 从访问次数计算概率分布
         policy = np.zeros(POLICY_SIZE, dtype=np.float32)
@@ -135,9 +142,10 @@ class MCTS:
         return policy
 
     def select_move(self, root_state: GameState,
-                    temperature: float = 1.0) -> tuple:
+                    temperature: float = 1.0,
+                    add_exploration_noise: bool = True) -> tuple:
         """搜索并采样一步走法。返回 (Move, policy)"""
-        probs = self.search(root_state, temperature)
+        probs = self.search(root_state, temperature, add_exploration_noise)
         legal_moves = root_state.legal_moves()
         if not legal_moves:
             return None, probs
@@ -160,7 +168,8 @@ class MCTS:
 
     # ── 选择 ──
 
-    def _select_leaf(self, root: MCTSNode, root_state: GameState):
+    def _select_leaf(self, root: MCTSNode, root_state: GameState,
+                     pending_nodes=None):
         """选择一个叶节点。施加虚拟损失防止同batch重复选择。"""
         node = root
         state = root_state.copy()
@@ -172,9 +181,10 @@ class MCTS:
                 break
             path.append((node, idx))
             node = node.children[idx]
-            # 虚拟损失：压低Q和inflate N，阻止同batch内重复选此路径
+            # Q is from the child's perspective. Raising it lowers -Q at
+            # the parent, so the reserved branch becomes less attractive.
             node.visit_count += self.virtual_loss
-            node.total_value -= self.virtual_loss
+            node.total_value += self.virtual_loss
             move = ActionEncoder.decode(idx)
             if move is None:
                 break
@@ -188,6 +198,12 @@ class MCTS:
                 value = r.to_value(state.turn)
             path.append((node, -1))          # 叶节点加入path
             return (node, state, path, True, value)
+
+        if pending_nodes is not None and id(node) in pending_nodes:
+            for reserved_node, _ in path[1:]:
+                reserved_node.visit_count -= self.virtual_loss
+                reserved_node.total_value -= self.virtual_loss
+            return None
 
         path.append((node, -1))              # 叶节点加入path
         return (node, state, path, False, 0.0)
@@ -211,7 +227,7 @@ class MCTS:
             else:
                 # 撤销虚拟损失 + 计入真实值
                 node.visit_count += 1 - vl
-                node.total_value += value + vl
+                node.total_value += value - vl
 
             value = -value           # 翻转为上一层视角
 
@@ -231,3 +247,4 @@ class MCTS:
             node.children[int(idx)] = MCTSNode(
                 prior=float(max(policy[idx], uniform_prior * 0.1)))
         return value
+

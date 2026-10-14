@@ -5,8 +5,10 @@
   - policy_loss: CrossEntropy(MCTS_policy, predicted_policy)
   - wdl_loss: CrossEntropy(wdl_target, wdl_logits)
 """
-import os
 import time
+import os
+import random
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Optional
 
@@ -14,7 +16,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, TensorDataset
 
 from .config import AlphaZeroConfig
 from .replay import ReplayBuffer
@@ -89,33 +90,28 @@ class Trainer:
             epoch_total_loss = 0.0
             n_batches = 0
 
-            # 随机采样
-            states, policies, wdls, weights = replay.sample(
-                min(samples_per_epoch, len(replay))
-            )
-            dataset = TensorDataset(
-                torch.from_numpy(states),
-                torch.from_numpy(policies),
-                torch.from_numpy(wdls),
-                torch.from_numpy(weights),
-            )
-            dataloader = DataLoader(
-                dataset,
-                batch_size=self.config.batch_size,
-                shuffle=True,
-                num_workers=min(4, os.cpu_count() or 1),
-                pin_memory=True if self.device == 'cuda' else False,
-                drop_last=True,
-            )
-
-            for batch_states, batch_policies, batch_wdls, batch_weights in dataloader:
-                batch_states = batch_states.to(self.device)
-                batch_policies = batch_policies.to(self.device)
-                batch_wdls = batch_wdls.to(self.device)
-                batch_weights = batch_weights.to(self.device)
+            # Decode only the current mini-batch. A full epoch of dense
+            # 8100-action targets would otherwise duplicate hundreds of MB.
+            steps = max(1, (samples_per_epoch + self.config.batch_size - 1)
+                        // self.config.batch_size)
+            accum = max(1, self.config.grad_accum_steps)
+            self.optimizer.zero_grad(set_to_none=True)
+            for step in range(steps):
+                batch_n = min(self.config.batch_size,
+                              samples_per_epoch - step * self.config.batch_size)
+                states, policies, wdls, weights = replay.sample(batch_n)
+                batch_states = torch.from_numpy(states).to(self.device)
+                batch_policies = torch.from_numpy(policies).to(self.device)
+                batch_wdls = torch.from_numpy(wdls).to(self.device)
+                batch_weights = torch.from_numpy(weights).to(self.device)
 
                 # 前向传播
-                p_logits, w_logits = self.model(batch_states)
+                use_bf16 = (str(self.device).startswith('cuda') and
+                            torch.cuda.is_bf16_supported())
+                autocast = (torch.autocast(device_type='cuda', dtype=torch.bfloat16)
+                            if use_bf16 else nullcontext())
+                with autocast:
+                    p_logits, w_logits = self.model(batch_states)
 
                 # Policy loss: cross-entropy (加权)
                 log_probs = F.log_softmax(p_logits, dim=1)
@@ -128,12 +124,15 @@ class Trainer:
 
                 # 总损失
                 loss = policy_loss + wdl_loss
+                if not torch.isfinite(loss):
+                    raise FloatingPointError("non-finite training loss")
 
                 # 反向传播
-                self.optimizer.zero_grad()
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 5.0)
-                self.optimizer.step()
+                (loss / accum).backward()
+                if (step + 1) % accum == 0 or step + 1 == steps:
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), 5.0)
+                    self.optimizer.step()
+                    self.optimizer.zero_grad(set_to_none=True)
 
                 epoch_total_loss += loss.item()
                 epoch_policy_loss += policy_loss.item()
@@ -200,11 +199,18 @@ class Trainer:
             'train_losses': self.train_losses,
             'policy_losses': self.policy_losses,
             'wdl_losses': self.wdl_losses,
+            'current_iteration': self.current_iteration,
+            'python_rng_state': random.getstate(),
+            'numpy_rng_state': np.random.get_state(),
+            'torch_rng_state': torch.get_rng_state(),
+            'cuda_rng_states': torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
         }
         if extra:
             checkpoint.update(extra)
 
-        torch.save(checkpoint, str(path))
+        temporary = path.with_name(path.name + ".tmp")
+        torch.save(checkpoint, str(temporary))
+        os.replace(temporary, path)
         print(f"Checkpoint 已保存: {path}")
         return str(path)
 
@@ -228,6 +234,16 @@ class Trainer:
         self.train_losses = state.get('train_losses', [])
         self.policy_losses = state.get('policy_losses', [])
         self.wdl_losses = state.get('wdl_losses', [])
+        self.current_iteration = state.get('current_iteration', 0)
+        if 'python_rng_state' in state:
+            random.setstate(state['python_rng_state'])
+        if 'numpy_rng_state' in state:
+            np.random.set_state(state['numpy_rng_state'])
+        if 'torch_rng_state' in state:
+            torch.set_rng_state(state['torch_rng_state'])
+        if torch.cuda.is_available() and state.get('cuda_rng_states'):
+            torch.cuda.set_rng_state_all(state['cuda_rng_states'])
 
         print(f"加载 checkpoint: {path}")
         return state
+

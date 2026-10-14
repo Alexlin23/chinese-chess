@@ -10,36 +10,38 @@ class AlphaZeroConfig:
     """AlphaZero 训练配置"""
 
     # ── 模型架构 ──
-    num_blocks: int = 20
-    num_filters: int = 256
+    num_blocks: int = 4
+    num_filters: int = 64
     input_channels: int = 18
     policy_size: int = 8100
     wdl_size: int = 3
 
     # ── MCTS 搜索 ──
-    num_simulations: int = 800
+    num_simulations: int = 64
     c_puct: float = 1.5
     dirichlet_alpha: float = 0.3
     dirichlet_epsilon: float = 0.25
-    mcts_batch_size: int = 256
+    mcts_batch_size: int = 16
     virtual_loss: float = 3.0
 
     # ── 自我对弈 ──
     temperature_ply: int = 30
-    games_per_iteration: int = 25000
+    games_per_iteration: int = 100
     max_game_ply: int = 512
     repetition_limit: int = 3
 
     # ── 训练 ──
-    batch_size: int = 4096
-    learning_rate: float = 0.2
+    batch_size: int = 64
+    grad_accum_steps: int = 1
+    learning_rate: float = 0.02
     lr_momentum: float = 0.9
     lr_decay_step: int = 100000
     lr_decay_rate: float = 0.1
     weight_decay: float = 1e-4
     epochs_per_iteration: int = 10
-    replay_buffer_size: int = 1_000_000
-    samples_per_epoch: int = 100000
+    replay_buffer_size: int = 100_000
+    replay_buffer_max_bytes: int = 512 * 1024 * 1024
+    samples_per_epoch: int = 10_000
 
     # ── 奖励权重 ──
     capture_reward: float = 0.3        # 吃子奖励（远小于赢棋的 1.0）
@@ -51,8 +53,8 @@ class AlphaZeroConfig:
     promotion_score_rate: float = 0.55
 
     # ── 并行 ──
-    num_workers: Optional[int] = None  # None = os.cpu_count()
-    inference_batch_size: int = 256
+    num_workers: Optional[int] = 4
+    inference_batch_size: int = 32
     inference_wait_ms: float = 10.0
 
     # ── 系统 ──
@@ -110,11 +112,13 @@ class AlphaZeroConfig:
         # 训练
         if 'training' in data:
             config.batch_size = data['training'].get('batch_size', config.batch_size)
+            config.grad_accum_steps = data['training'].get('grad_accum_steps', config.grad_accum_steps)
             config.learning_rate = data['training'].get('lr', config.learning_rate)
             config.lr_momentum = data['training'].get('lr_momentum', config.lr_momentum)
             config.weight_decay = data['training'].get('weight_decay', config.weight_decay)
             config.epochs_per_iteration = data['training'].get('epochs', config.epochs_per_iteration)
             config.replay_buffer_size = data['training'].get('replay_buffer', config.replay_buffer_size)
+            config.replay_buffer_max_bytes = data['training'].get('replay_buffer_max_bytes', config.replay_buffer_max_bytes)
             config.samples_per_epoch = data['training'].get('samples_per_epoch', config.samples_per_epoch)
             config.capture_reward = data['training'].get('capture_reward', config.capture_reward)
             config.non_terminal_base_weight = data['training'].get('non_terminal_base_weight', config.non_terminal_base_weight)
@@ -149,3 +153,4 @@ class AlphaZeroConfig:
             config.max_iterations = data['pipeline'].get('max_iterations', config.max_iterations)
 
         return config
+

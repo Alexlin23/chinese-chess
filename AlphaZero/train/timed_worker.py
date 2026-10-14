@@ -14,6 +14,7 @@ from AlphaZero.engine.move import ActionEncoder
 from AlphaZero.engine.constants import POLICY_SIZE
 from AlphaZero.train.config import AlphaZeroConfig
 from AlphaZero.train.inference_server import BatchRequest, BatchResponse
+from AlphaZero.train.replay import pack_sample
 
 
 class TimedRemoteEvaluator:
@@ -58,12 +59,16 @@ class TimedRemoteEvaluator:
 
         # 发送
         t0 = time.perf_counter()
-        self.request_queue.put(req)
+        self.request_queue.put(req, timeout=30)
         self.t_queue_put += time.perf_counter() - t0
 
         # 接收
         t0 = time.perf_counter()
         resp: BatchResponse = self.response_queue.get(timeout=120)
+        if resp.request_id != req.request_id or resp.worker_id != self.worker_id:
+            raise RuntimeError("mismatched inference response")
+        if resp.error:
+            raise RuntimeError(f"inference failed: {resp.error}")
         self.t_queue_get += time.perf_counter() - t0
 
         self.n_calls += n
@@ -91,7 +96,6 @@ def timed_self_play_worker_fn(
 ):
     """带计时的 Self-Play Worker"""
     from AlphaZero.search import MCTS
-    from AlphaZero.train.replay import ReplayBuffer
 
     evaluator = TimedRemoteEvaluator(worker_id, request_queue, response_queue)
     mcts = MCTS(
@@ -104,7 +108,6 @@ def timed_self_play_worker_fn(
         virtual_loss=config.virtual_loss,
     )
 
-    replay = ReplayBuffer(max_size=num_games * config.max_game_ply)
     stats = {'red': 0, 'black': 0, 'draw': 0, 'moves': 0, 'games': 0}
     t_start = time.perf_counter()
 
@@ -131,9 +134,9 @@ def timed_self_play_worker_fn(
                 break
 
             # 检查是否吃子
-            captured = state.board[move.to_row][move.to_col] is not None
+            captured = state.board[move.to_row][move.to_col] != 0
 
-            positions.append((state.encode(), policy.copy(), state.turn, captured))
+            positions.append((pack_sample(state, policy, np.array([0, 1, 0])), captured))
             state = state.apply(move)
             move_count += 1
 
@@ -142,14 +145,18 @@ def timed_self_play_worker_fn(
                 print(f"  [Worker {worker_id}] 局{game_idx+1} 步{move_count} "
                       f"({t_move_elapsed:.2f}s/步)")
 
+        if stop_event.is_set():
+            break
+
         # 终局结果
         result = state.game_result()
         if result is None:
             from AlphaZero.engine.state import GameResult
             result = GameResult(None, "max_ply")
 
-        for state_enc, policy, is_red, captured in positions:
-            current_player = RED if is_red else BLACK
+        game_samples = []
+        for sample, captured in positions:
+            current_player = RED if sample.turn else BLACK
             wdl = result.to_wdl(current_player)
 
             # 计算权重（对齐 self_play_worker.py）
@@ -160,7 +167,12 @@ def timed_self_play_worker_fn(
                 if captured:
                     weight += config.capture_reward
 
-            replay.add(state_enc, policy, wdl, weight)
+            sample.wdl_index = int(np.argmax(wdl))
+            sample.weight = float(weight)
+            game_samples.append(sample)
+
+        if game_samples:
+            result_queue.put(('GAME', game_samples))
 
         if result.is_draw:
             stats['draw'] += 1
@@ -182,13 +194,5 @@ def timed_self_play_worker_fn(
     stats['elapsed'] = elapsed
     stats['worker_id'] = worker_id
 
-    if len(replay) > 0:
-        for i in range(len(replay)):
-            result_queue.put((
-                replay.states[i],
-                replay.policies[i],
-                replay.wdls[i],
-                replay.weights[i],
-            ))
-
     result_queue.put(('DONE', stats, None))
+

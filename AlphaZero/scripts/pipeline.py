@@ -9,6 +9,7 @@ import os
 import gc
 import time
 import argparse
+from queue import Empty
 from pathlib import Path
 from datetime import datetime
 import multiprocessing as mp
@@ -80,7 +81,8 @@ def parallel_self_play(config: AlphaZeroConfig,
                        games_per_worker: int,
                        device: str = 'cuda',
                        opponent_mode: str = 'self',
-                       verbose: bool = True) -> ReplayBuffer:
+                       verbose: bool = True,
+                       replay: ReplayBuffer = None) -> ReplayBuffer:
     """多进程并行自对弈"""
     server = InferenceServer(
         model_path=model_path,
@@ -93,7 +95,7 @@ def parallel_self_play(config: AlphaZeroConfig,
     if verbose:
         print(f"  InferenceServer 已启动 (PID={server_pid}, device={device})")
 
-    result_queue = Queue(maxsize=200000)
+    result_queue = Queue(maxsize=max(2, num_workers * 2))
     stop_event = Event()
     processes = []
 
@@ -111,20 +113,35 @@ def parallel_self_play(config: AlphaZeroConfig,
     if verbose:
         print(f"  {num_workers} 个 SelfPlayWorker 已启动")
 
-    replay = ReplayBuffer(max_size=config.replay_buffer_size)
+    def stop_processes():
+        stop_event.set()
+        server.stop()
+        for process in processes:
+            process.join(timeout=5)
+            if process.is_alive():
+                process.terminate()
+
+    if replay is None:
+        replay = ReplayBuffer(max_size=config.replay_buffer_size,
+                              max_bytes=config.replay_buffer_max_bytes)
     workers_done = 0
     total_stats = {'red': 0, 'black': 0, 'draw': 0, 'moves': 0, 'games': 0}
     t_start = time.perf_counter()
 
     while workers_done < num_workers:
         try:
-            item = result_queue.get(timeout=300)  # 5分钟超时
-        except:
-            # 检查worker是否还活着
-            alive = sum(1 for p in processes if p.is_alive())
-            if alive == 0 and workers_done < num_workers:
-                print(f"  ⚠ 所有Worker已退出，但只有 {workers_done}/{num_workers} 报告完成")
-                break
+            item = result_queue.get(timeout=5)
+        except Empty:
+            failed = [i for i, p in enumerate(processes)
+                      if p.exitcode is not None and p.exitcode != 0]
+            if failed or not server._process.is_alive():
+                stop_processes()
+                raise RuntimeError(f"self-play process failed: workers={failed}, "
+                                   f"inference_exit={server._process.exitcode}")
+            if all(not p.is_alive() for p in processes):
+                stop_processes()
+                raise RuntimeError(f"workers exited without completion: "
+                                   f"{workers_done}/{num_workers}")
             continue
 
         if (isinstance(item, tuple) and len(item) == 3
@@ -139,9 +156,12 @@ def parallel_self_play(config: AlphaZeroConfig,
                       f"{stats['games']}局 {stats['moves']}步 "
                       f"({stats['elapsed']:.0f}s) "
                       f"[{workers_done}/{num_workers}]")
+        elif isinstance(item, tuple) and item[0] == 'GAME':
+            for sample in item[1]:
+                replay.add_packed(sample)
         else:
-            state_enc, policy, wdl, weight = item
-            replay.add(state_enc, policy, wdl, weight)
+            stop_processes()
+            raise RuntimeError(f"unexpected worker message: {type(item)}")
 
         # 更新监控
         monitor.update(
@@ -178,12 +198,7 @@ def parallel_self_play(config: AlphaZeroConfig,
                       f"CPU={cpu_percent:.0f}% {gpu_info} "
                       f"ETA={eta/60:.0f}min")
 
-    stop_event.set()
-    server.stop()
-    for p in processes:
-        p.join(timeout=5)
-        if p.is_alive():
-            p.terminate()
+    stop_processes()
 
     elapsed = time.perf_counter() - t_start
     if verbose:
@@ -209,7 +224,7 @@ def pipeline(config: AlphaZeroConfig,
         # 尝试从config获取（需要在config中添加这个字段）
         max_iterations = getattr(config, 'max_iterations', 100)
     output_dir = output_dir or config.checkpoint_dir
-    num_workers = config.num_workers or os.cpu_count() or 4
+    num_workers = config.num_workers or 4
 
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -222,6 +237,8 @@ def pipeline(config: AlphaZeroConfig,
     start = 0
     loaded_from = None  # 记录加载来源
 
+    training_state_path = out / "latest_training.pt"
+    replay_path = out / "replay.npz"
     # 决定从哪个 checkpoint 加载
     if resume is not None:
         # 显式指定 --resume path
@@ -229,12 +246,12 @@ def pipeline(config: AlphaZeroConfig,
     elif checkpoint:
         resume_path = checkpoint
     else:
-        # 默认：没有显式指定 → 自动检测 best.pt
-        best_path = str(out / "best.pt")
-        if Path(best_path).exists():
-            resume_path = best_path
+        # Resume the full optimizer/scheduler state when available.
+        if training_state_path.exists():
+            resume_path = str(training_state_path)
         else:
-            resume_path = None
+            best_path = str(out / "best.pt")
+            resume_path = best_path if Path(best_path).exists() else None
         if resume_path is None:
             print("未找到已有模型，从头开始训练（随机初始化参数）")
 
@@ -255,7 +272,9 @@ def pipeline(config: AlphaZeroConfig,
 
     trainer = Trainer(config, device)
     if loaded_from:
-        trainer.model.load_state_dict(model.state_dict())
+        state = trainer.load_checkpoint(loaded_from)
+        start = trainer.current_iteration
+        model.load_state_dict(trainer.model.state_dict())
 
     arena = Arena(config, device)
     best_model_path = str(out / "best.pt")
@@ -293,7 +312,14 @@ def pipeline(config: AlphaZeroConfig,
     total_start = time.perf_counter()
     history = []
     total_promoted = 0
-    opponent_mode = 'heuristic'  # 从启发式冷启动开始
+    opponent_mode = (state.get('opponent_mode', 'self') if loaded_from
+                     else 'self')
+    replay = (ReplayBuffer.load(replay_path,
+                               max_size=config.replay_buffer_size,
+                               max_bytes=config.replay_buffer_max_bytes)
+              if replay_path.exists() else
+              ReplayBuffer(config.replay_buffer_size,
+                           config.replay_buffer_max_bytes))
 
     for it in range(start, start + max_iterations):
         ts = datetime.now().strftime("%H:%M:%S")
@@ -313,12 +339,7 @@ def pipeline(config: AlphaZeroConfig,
         # 更新监控
         monitor.update(iteration=it+1, phase='self_play')
 
-        # 并行自对弈（释放上一轮 replay_buffer 避免碎片化）
-        try:
-            del replay
-            gc.collect()
-        except NameError:
-            pass
+        # Keep the bounded replay pool across iterations.
         games_per_worker = max(1, config.games_per_iteration // num_workers)
         replay = parallel_self_play(
             config=config,
@@ -327,6 +348,7 @@ def pipeline(config: AlphaZeroConfig,
             games_per_worker=games_per_worker,
             device=device,
             opponent_mode=opponent_mode,
+            replay=replay,
         )
 
         # 更新监控
@@ -372,20 +394,11 @@ def pipeline(config: AlphaZeroConfig,
             torch.save({'model_state_dict': model.state_dict(),
                        'config': config.to_dict()},
                        best_model_path)
-        elif it == start:
-            # 第一轮直接晋升，不做 Arena
-            print(f"  ✓ 第一轮直接晋升")
-            total_promoted += 1
-            arena_result = {'wins': 0, 'losses': 0, 'draws': 0,
-                           'score_rate': 1.0, 'should_promote': True}
-            torch.save({'model_state_dict': model.state_dict(),
-                       'config': config.to_dict()},
-                       best_model_path)
         else:
             print(f"  Arena: {config.arena_games} 局 vs 旧模型...")
             monitor.update(phase='arena', arena_w=0, arena_l=0, arena_d=0)
 
-            arena_result = arena.evaluate(candidate_path, model_old_path)
+            arena_result = arena.evaluate(candidate_path, best_model_path)
             print(f"  结果: W={arena_result['wins']} L={arena_result['losses']} "
                   f"D={arena_result['draws']} score={arena_result['score_rate']:.1%}")
 
@@ -396,11 +409,7 @@ def pipeline(config: AlphaZeroConfig,
                 arena_d=arena_result['draws'],
             )
 
-            # 晋升条件：score >= 阈值 或 全平局（新模型不比旧模型差）
-            should_promote = (
-                arena_result['should_promote'] or
-                (arena_result['losses'] == 0 and arena_result['wins'] == 0)
-            )
+            should_promote = arena_result['should_promote']
             if should_promote:
                 print(f"  ✓ 晋升")
                 total_promoted += 1
@@ -409,9 +418,10 @@ def pipeline(config: AlphaZeroConfig,
                            best_model_path)
             else:
                 print(f"  ✗ 回滚")
-                ck = torch.load(model_old_path, map_location=device)
+                ck = torch.load(best_model_path, map_location=device)
                 model.load_state_dict(ck['model_state_dict'])
                 trainer.model.load_state_dict(ck['model_state_dict'])
+                trainer.optimizer.state.clear()
 
         # 更新监控
         monitor.update(promoted=total_promoted)
@@ -426,6 +436,10 @@ def pipeline(config: AlphaZeroConfig,
         torch.save({'model_state_dict': model.state_dict(),
                     'config': config.to_dict()},
                    str(out / "latest.pt"))
+        replay.save(replay_path)
+        trainer.save_checkpoint(str(training_state_path),
+                                extra={'opponent_mode': opponent_mode,
+                                       'last_completed_iteration': it})
 
     # 停止监控
     monitor.stop()
@@ -469,3 +483,4 @@ if __name__ == "__main__":
              checkpoint=args.checkpoint, resume=args.resume,
              output_dir=args.output,
              enable_monitor=not args.no_monitor)
+

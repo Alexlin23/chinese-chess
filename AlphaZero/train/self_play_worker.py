@@ -21,6 +21,7 @@ from AlphaZero.engine.constants import POLICY_SIZE
 from AlphaZero.engine.heuristic import heuristic_move
 from AlphaZero.train.config import AlphaZeroConfig
 from AlphaZero.train.inference_server import BatchRequest, BatchResponse
+from AlphaZero.train.replay import pack_sample
 
 
 class BatchRemoteEvaluator:
@@ -63,10 +64,14 @@ class BatchRemoteEvaluator:
         )
 
         # 一次发送
-        self.request_queue.put(req)
+        self.request_queue.put(req, timeout=30)
 
         # 一次接收
         resp: BatchResponse = self.response_queue.get(timeout=120)
+        if resp.request_id != req.request_id or resp.worker_id != self.worker_id:
+            raise RuntimeError("mismatched inference response")
+        if resp.error:
+            raise RuntimeError(f"inference failed: {resp.error}")
 
         return resp.policies, resp.values
 
@@ -83,7 +88,6 @@ def self_play_worker_fn(
 ):
     """Self-Play Worker 主函数"""
     from AlphaZero.search import MCTS
-    from AlphaZero.train.replay import ReplayBuffer
 
     evaluator = BatchRemoteEvaluator(worker_id, request_queue, response_queue)
     mcts = MCTS(
@@ -96,7 +100,6 @@ def self_play_worker_fn(
         virtual_loss=config.virtual_loss,
     )
 
-    replay = ReplayBuffer(max_size=num_games * config.max_game_ply)
     stats = {'red': 0, 'black': 0, 'draw': 0, 'moves': 0, 'games': 0}
     t_start = time.perf_counter()
 
@@ -122,8 +125,8 @@ def self_play_worker_fn(
                 action_idx = ActionEncoder.encode(move)
                 policy = np.zeros(POLICY_SIZE, dtype=np.float32)
                 policy[action_idx] = 1.0
-                captured = state.board[move.to_row][move.to_col] is not None
-                positions.append((state.encode(), policy, state.turn, captured))
+                captured = state.board[move.to_row][move.to_col] != 0
+                positions.append((pack_sample(state, policy, np.array([0, 1, 0])), captured))
                 state = state.apply(move)
             else:
                 # AI走棋 → MCTS分布式policy
@@ -131,9 +134,12 @@ def self_play_worker_fn(
                 move, policy = mcts.select_move(state, temperature=temperature)
                 if move is None:
                     break
-                captured = state.board[move.to_row][move.to_col] is not None
-                positions.append((state.encode(), policy.copy(), state.turn, captured))
+                captured = state.board[move.to_row][move.to_col] != 0
+                positions.append((pack_sample(state, policy, np.array([0, 1, 0])), captured))
                 state = state.apply(move)
+
+        if stop_event.is_set():
+            break
 
         # 终局结果
         result = state.game_result()
@@ -141,8 +147,9 @@ def self_play_worker_fn(
             from AlphaZero.engine.state import GameResult
             result = GameResult(None, "max_ply")
 
-        for state_enc, policy, is_red, captured in positions:
-            current_player = RED if is_red else BLACK
+        game_samples = []
+        for sample, captured in positions:
+            current_player = RED if sample.turn else BLACK
             wdl = result.to_wdl(current_player)
 
             # 计算权重
@@ -156,7 +163,12 @@ def self_play_worker_fn(
                 if captured:
                     weight += config.capture_reward
 
-            replay.add(state_enc, policy, wdl, weight)
+            sample.wdl_index = int(np.argmax(wdl))
+            sample.weight = float(weight)
+            game_samples.append(sample)
+
+        if game_samples:
+            result_queue.put(('GAME', game_samples))
 
         if result.is_draw:
             stats['draw'] += 1
@@ -171,13 +183,5 @@ def self_play_worker_fn(
     stats['elapsed'] = elapsed
     stats['worker_id'] = worker_id
 
-    if len(replay) > 0:
-        for i in range(len(replay)):
-            result_queue.put((
-                replay.states[i],
-                replay.policies[i],
-                replay.wdls[i],
-                replay.weights[i],
-            ))
-
     result_queue.put(('DONE', stats, None))
+

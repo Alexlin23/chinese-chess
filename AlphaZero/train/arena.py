@@ -6,6 +6,7 @@ import numpy as np
 import torch
 
 from .config import AlphaZeroConfig
+from .arena_stats import promotion_evidence
 from ..model import PolicyWDLEncoder, NeuralEvaluator
 from ..search import MCTS
 from ..engine import GameState, RED, BLACK
@@ -92,15 +93,15 @@ class Arena:
         if verbose:
             print()
 
-        total = wins + losses + draws
-        score_rate = (wins + 0.5 * draws) / total if total > 0 else 0.0
-        should_promote = score_rate >= self.config.promotion_score_rate
+        score_rate, decisive_lower_bound, should_promote = promotion_evidence(
+            wins, losses, draws, self.config.promotion_score_rate)
 
         return {
             'wins': wins,
             'losses': losses,
             'draws': draws,
             'score_rate': score_rate,
+            'decisive_win_rate_lower_95': decisive_lower_bound,
             'should_promote': should_promote,
         }
 
@@ -136,9 +137,11 @@ class Arena:
 
         while not state.is_terminal():
             if state.turn:  # 红方
-                move, _ = red_mcts.select_move(state, temperature=0.0)
+                move, _ = red_mcts.select_move(
+                    state, temperature=0.0, add_exploration_noise=False)
             else:  # 黑方
-                move, _ = black_mcts.select_move(state, temperature=0.0)
+                move, _ = black_mcts.select_move(
+                    state, temperature=0.0, add_exploration_noise=False)
 
             if move is None:
                 break
@@ -148,3 +151,4 @@ class Arena:
         if result is None:
             return GR(None, "max_ply")
         return result
+
