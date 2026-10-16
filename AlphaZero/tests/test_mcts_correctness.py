@@ -17,7 +17,8 @@ class ConstantEvaluator:
         return np.zeros(POLICY_SIZE, dtype=np.float32), 0.0
 
     def evaluate_batch(self, states):
-        keys = [(s.board.tobytes(), s.turn) for s in states]
+        # Transpositions with different histories are different rule states.
+        keys = [(s.board.tobytes(), s.turn, s.position_history) for s in states]
         assert len(keys) == len(set(keys)), "same unexpanded leaf evaluated twice"
         self.batch_sizes.append(len(states))
         return (np.zeros((len(states), POLICY_SIZE), dtype=np.float32),
@@ -60,7 +61,8 @@ def test_search_finds_immediate_king_capture_without_duplicate_leaves():
         state, temperature=0.0, add_exploration_noise=False)
     assert move == Move(1, 4, 0, 4)
     assert state.apply(move).game_result().winner == RED
-    assert policy[ActionEncoder.encode(move)] == 1.0
+    # Greedy action selection does not turn the training target into one-hot.
+    assert policy.argmax() == ActionEncoder.encode(move)
     assert np.isclose(policy.sum(), 1.0)
     assert len(evaluator.batch_sizes) > 0
 

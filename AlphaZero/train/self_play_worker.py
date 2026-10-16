@@ -1,187 +1,141 @@
-"""多进程 Self-Play Worker — 批量推理优化版
-
-每个 worker:
-  1. 创建自己的 MCTS 实例
-  2. 使用 BatchRemoteEvaluator 批量请求推理
-  3. 完成一局后把训练数据放入 result_queue
-"""
-import sys
+"""Continuous independent episodes, uniform root-visit targets and lossy UI events."""
+from queue import Empty, Full
+import json
 import time
 import numpy as np
-from multiprocessing import Process, Queue, Event
-from pathlib import Path
-from typing import Optional
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
+from .inference_server import BatchRequest
+from .replay import pack_sample
+from ..engine import GameState
+from ..search import MCTS
 
-_project_root = Path(__file__).parent.parent.parent
-sys.path.insert(0, str(_project_root))
 
-from AlphaZero.engine import GameState, RED, BLACK
-from AlphaZero.engine.move import ActionEncoder
-from AlphaZero.engine.constants import POLICY_SIZE
-from AlphaZero.engine.heuristic import heuristic_move
-from AlphaZero.train.config import AlphaZeroConfig
-from AlphaZero.train.inference_server import BatchRequest, BatchResponse
-from AlphaZero.train.replay import pack_sample
+def self_play_group_fn(worker_ids, config, request_queue, response_queues,
+                       result_queue, event_queue, stop_event, start_sequences):
+    """Independent games share a CPU process while each waits for its own inference.
 
+    Each game still has a private RNG, search tree, response queue and pinned
+    snapshot. Threads overlap independent games, never dependent tree leaves.
+    """
+    with ThreadPoolExecutor(max_workers=len(worker_ids)) as pool:
+        futures = [pool.submit(self_play_worker_fn, worker, config, request_queue,
+            response_queues[worker], result_queue, event_queue, stop_event,
+            start_sequences.get(worker, 0)) for worker in worker_ids]
+        done, _ = wait(futures, return_when=FIRST_COMPLETED)
+        failures = [future.exception() for future in done if future.exception() is not None]
+        if failures:
+            stop_event.set()
+            raise failures[0]
+        if not stop_event.is_set():
+            stop_event.set()
+            raise RuntimeError("self-play slot exited unexpectedly")
 
 class BatchRemoteEvaluator:
-    """批量远程评估器 — 一次发送整个 batch，一次接收整个 batch
+    def __init__(self, worker_id, request_queue, response_queue, stop_event=None):
+        self.worker_id, self.request_queue, self.response_queue = worker_id, request_queue, response_queue
+        self.stop_event = stop_event
+        self._request_counter, self.model_step = 0, 0
+        self.pinned_step = None
 
-    大幅减少队列操作次数：从 2*N 次降到 2 次。
-    """
-
-    def __init__(self, worker_id: int,
-                 request_queue: Queue,
-                 response_queue: Queue):
-        self.worker_id = worker_id
-        self.request_queue = request_queue
-        self.response_queue = response_queue
-        self._request_counter = 0
-
-    def evaluate(self, state: GameState) -> tuple[np.ndarray, float]:
-        """评估单个局面（兼容接口）"""
+    def evaluate(self, state):
         policies, values = self.evaluate_batch([state])
-        return policies[0], values[0]
+        return policies[0], float(values[0])
 
-    def evaluate_batch(self, states: list[GameState]) -> tuple[np.ndarray, np.ndarray]:
-        """批量评估：一次发送，一次接收"""
-        n = len(states)
+    def evaluate_batch(self, states):
         self._request_counter += 1
-
-        # 编码所有状态
-        state_list = []
-        mask_list = []
-        for s in states:
-            state_list.append(s.encode())
-            mask_list.append(s.legal_mask())
-
-        # 打包成一个请求
-        req = BatchRequest(
-            request_id=self._request_counter,
-            states=np.stack(state_list),
-            masks=np.stack(mask_list),
-            worker_id=self.worker_id,
-        )
-
-        # 一次发送
-        self.request_queue.put(req, timeout=30)
-
-        # 一次接收
-        resp: BatchResponse = self.response_queue.get(timeout=120)
-        if resp.request_id != req.request_id or resp.worker_id != self.worker_id:
+        request = BatchRequest(self._request_counter, np.stack([s.encode() for s in states]),
+                               np.stack([s.canonical_mask() for s in states]), self.worker_id,
+                               self.pinned_step)
+        self.request_queue.put(request, timeout=10)
+        deadline = time.monotonic() + 120
+        while True:
+            if self.stop_event is not None and self.stop_event.is_set():
+                raise InterruptedError("self-play cancelled")
+            try:
+                response = self.response_queue.get(timeout=1)
+                break
+            except Empty:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("neural inference timed out")
+        if response.worker_id != self.worker_id or response.request_id != request.request_id:
             raise RuntimeError("mismatched inference response")
-        if resp.error:
-            raise RuntimeError(f"inference failed: {resp.error}")
+        if response.error:
+            raise RuntimeError(response.error)
+        self.model_step = response.model_step
+        if self.pinned_step is not None and self.model_step != self.pinned_step:
+            raise RuntimeError("actor version changed inside an episode")
+        self.pinned_step = self.model_step
+        for i, state in enumerate(states):
+            if not state.turn:
+                response.policies[i] = response.policies[i, ::-1].copy()
+        return response.policies, response.values
 
-        return resp.policies, resp.values
+def selfplay_temperature(ply, num_sampling_moves=30):
+    """Data S1 select_action: first 30 plies sample; then highest visit count."""
+    return 1.0 if ply < num_sampling_moves else 0.0
 
-
-def self_play_worker_fn(
-    worker_id: int,
-    config: AlphaZeroConfig,
-    num_games: int,
-    request_queue: Queue,
-    response_queue: Queue,
-    result_queue: Queue,
-    stop_event: Event,
-    opponent_mode: str = 'self',
-):
-    """Self-Play Worker 主函数"""
-    from AlphaZero.search import MCTS
-
-    evaluator = BatchRemoteEvaluator(worker_id, request_queue, response_queue)
-    mcts = MCTS(
-        evaluator=evaluator,
-        num_simulations=config.num_simulations,
-        c_puct=config.c_puct,
-        dirichlet_alpha=config.dirichlet_alpha,
-        dirichlet_epsilon=config.dirichlet_epsilon,
-        batch_size=config.mcts_batch_size,
-        virtual_loss=config.virtual_loss,
-    )
-
-    stats = {'red': 0, 'black': 0, 'draw': 0, 'moves': 0, 'games': 0}
-    t_start = time.perf_counter()
-
-    for game_idx in range(num_games):
-        if stop_event.is_set():
-            break
-
-        state = GameState.new_game(max_ply=config.max_game_ply)
-        positions = []
-        ai_is_red = (game_idx % 2 == 0)  # AI交替执红，避免颜色偏差
-
-        while not state.is_terminal() and state.move_count < config.max_game_ply:
+def self_play_worker_fn(worker_id, config, request_queue, response_queue,
+                        result_queue, event_queue, stop_event, start_sequence=0):
+    evaluator = BatchRemoteEvaluator(worker_id, request_queue, response_queue, stop_event)
+    sequence = start_sequence
+    def emit(data):
+        try:
+            event_queue.put_nowait(data)
+        except Full:
+            pass  # Display cannot stall simulation or the reliable training queue.
+    try:
+        while not stop_event.is_set():
+            evaluator.pinned_step = None
+            episode = f"w{worker_id}-g{sequence}"
+            rng = np.random.default_rng(np.random.SeedSequence([config.seed, worker_id, sequence]))
+            state = GameState.new_game(config.max_game_ply)
+            search = MCTS(evaluator, config.num_simulations, config.c_puct,
+                          config.dirichlet_alpha, config.dirichlet_epsilon,
+                          config.mcts_batch_size, config.virtual_loss, config.pb_c_base, rng,
+                          reuse_tree=config.reuse_tree)
+            positions, moves, versions = [], [], []
+            started = time.time()
+            actor_start = evaluator.model_step
+            while not state.is_terminal() and not stop_event.is_set():
+                emit(dict(kind="board", worker=worker_id, episode=episode, sequence=sequence, ply=state.move_count,
+                          board=state.board.tolist(), turn=state.current_player, started=started,
+                          actor_step=evaluator.model_step, diagnostics=search.diagnostics,
+                          last_move=moves[-1] if moves else None))
+                move, pi = search.select_move(state, temperature=selfplay_temperature(state.move_count, config.num_sampling_moves),
+                                              add_exploration_noise=True)
+                if move is None:
+                    raise RuntimeError("no action in nonterminal episode")
+                if not positions:
+                    actor_start = evaluator.model_step
+                positions.append((pack_sample(state, pi, 0), state.current_player))
+                moves.append([move.from_row, move.from_col, move.to_row, move.to_col])
+                versions.append(evaluator.model_step)
+                state = state.apply(move)
             if stop_event.is_set():
                 break
-
-            is_ai_turn = (state.turn == ai_is_red)
-
-            if opponent_mode == 'heuristic' and not is_ai_turn:
-                # 启发式走棋 → one-hot policy
-                move = heuristic_move(state)
-                if move is None:
+            result = state.game_result()
+            if result is None:
+                raise RuntimeError("unfinished episode cannot enter replay")
+            samples = []
+            for sample, player in positions:
+                sample.value = result.to_value(player)
+                samples.append(sample)
+            message = dict(kind="game", episode=episode, worker=worker_id, sequence=sequence,
+                           samples=samples, reason=result.reason, winner=result.winner,
+                           actor_start=actor_start, actor_end=evaluator.model_step,
+                           trace=json.dumps(dict(moves=moves, actor_steps=versions,
+                                                 num_simulations=config.num_simulations)), ply=state.move_count,
+                           board=state.board.tolist(), turn=state.current_player)
+            while not stop_event.is_set():
+                try:
+                    result_queue.put(message, timeout=1)
                     break
-                action_idx = ActionEncoder.encode(move)
-                policy = np.zeros(POLICY_SIZE, dtype=np.float32)
-                policy[action_idx] = 1.0
-                captured = state.board[move.to_row][move.to_col] != 0
-                positions.append((pack_sample(state, policy, np.array([0, 1, 0])), captured))
-                state = state.apply(move)
-            else:
-                # AI走棋 → MCTS分布式policy
-                temperature = 1.0 if state.move_count < config.temperature_ply else 0.1
-                move, policy = mcts.select_move(state, temperature=temperature)
-                if move is None:
-                    break
-                captured = state.board[move.to_row][move.to_col] != 0
-                positions.append((pack_sample(state, policy, np.array([0, 1, 0])), captured))
-                state = state.apply(move)
-
-        if stop_event.is_set():
-            break
-
-        # 终局结果
-        result = state.game_result()
-        if result is None:
-            from AlphaZero.engine.state import GameResult
-            result = GameResult(None, "max_ply")
-
-        game_samples = []
-        for sample, captured in positions:
-            current_player = RED if sample.turn else BLACK
-            wdl = result.to_wdl(current_player)
-
-            # 计算权重
-            if result.is_draw or result.winner is None:
-                # 和棋或非终局：基础权重
-                weight = config.non_terminal_base_weight
-            else:
-                # 终局：根据是否吃子给不同权重
-                weight = config.terminal_weight if captured else 1.0
-                # 吃子额外奖励
-                if captured:
-                    weight += config.capture_reward
-
-            sample.wdl_index = int(np.argmax(wdl))
-            sample.weight = float(weight)
-            game_samples.append(sample)
-
-        if game_samples:
-            result_queue.put(('GAME', game_samples))
-
-        if result.is_draw:
-            stats['draw'] += 1
-        elif result.winner == RED:
-            stats['red'] += 1
-        else:
-            stats['black'] += 1
-        stats['moves'] += state.move_count
-        stats['games'] += 1
-
-    elapsed = time.perf_counter() - t_start
-    stats['elapsed'] = elapsed
-    stats['worker_id'] = worker_id
-
-    result_queue.put(('DONE', stats, None))
-
+                except Full:
+                    continue
+            sequence += 1
+    except InterruptedError:
+        if not stop_event.is_set():
+            raise
+    except BaseException as exc:
+        emit(dict(kind="worker_error", worker=worker_id, error=repr(exc)))
+        raise

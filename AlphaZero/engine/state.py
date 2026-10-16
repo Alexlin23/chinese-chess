@@ -1,321 +1,206 @@
-"""棋盘状态封装 — GameState 不可变快照
+"""Immutable rule state and eight-frame current-player observations.
 
-支持：
-- 重复局面检测（三次重复平局）
-- 最大步数限制
-- WDL 结果输出
+Target: Chinese Xiangqi Competition Rules (2020). Chase adjudication is incomplete.
+Do not describe this development rule version as fully compliant.
 """
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Optional
 import numpy as np
-
-from .constants import (
-    ROWS, COLS, KING, RED, BLACK,
-    MAX_GAME_PLY, REPETITION_LIMIT, WDL_WIN, WDL_DRAW, WDL_LOSS
-)
-from .fast_chess import (
-    create_initial_board, get_valid_moves, make_move, is_in_check
-)
+from .constants import ROWS, COLS, KING, RED, BLACK, MAX_GAME_PLY, INPUT_CHANNELS
+from .fast_chess import create_initial_board, get_valid_moves, make_move, is_in_check
 from .move import Move, ActionEncoder
-from .repetition import position_key, update_repetition, is_repetition_draw
+from .repetition import position_key
 
+def player_id(player):
+    if isinstance(player, (bool, np.bool_)):
+        return RED if player else BLACK
+    if player in ("r", RED):
+        return RED
+    if player in ("b", BLACK):
+        return BLACK
+    raise ValueError(f"invalid player: {player!r}")
 
 @dataclass(frozen=True)
 class GameResult:
-    """游戏结果"""
-    winner: Optional[int]  # RED, BLACK, None(平局)
-    reason: str            # king_captured | no_legal_move | max_ply | repetition
+    winner: Optional[int]
+    reason: str
 
     @property
-    def is_draw(self) -> bool:
+    def is_draw(self):
         return self.winner is None
 
-    def to_wdl(self, current_player: int) -> np.ndarray:
-        """转换为当前玩家视角的 WDL 向量
+    def to_value(self, current_player):
+        return 0.0 if self.is_draw else (1.0 if self.winner == player_id(current_player) else -1.0)
 
-        Args:
-            current_player: RED 或 BLACK
-
-        Returns:
-            (3,) float32 [win, draw, loss]
-        """
-        if self.is_draw:
-            return np.array([0, 1, 0], dtype=np.float32)
-        elif self.winner == current_player:
-            return np.array([1, 0, 0], dtype=np.float32)
-        else:
-            return np.array([0, 0, 1], dtype=np.float32)
-
-    def to_value(self, current_player: int) -> float:
-        """转换为当前玩家视角的标量值 [-1, +1]"""
-        if self.is_draw:
-            return 0.0
-        elif self.winner == current_player:
-            return 1.0
-        else:
-            return -1.0
-
+    def to_wdl(self, current_player):
+        value = self.to_value(current_player)
+        return np.array([value > 0, value == 0, value < 0], dtype=np.float32)
 
 class GameState:
-    """不可变棋盘状态快照。
+    __slots__ = ("board", "turn", "move_count", "no_capture_count", "repetition_counts",
+                 "last_move", "_max_ply", "_encoding", "_legal_mask", "_moves",
+                 "history", "position_history", "check_history", "_outcome", "_resolved")
 
-    内部持有:
-      - board: numpy int8 (10,9)
-      - turn: bool (True=红, False=黑)
-      - move_count: int 已走步数
-      - no_capture_count: int 连续无吃子步数
-      - repetition_counts: dict 局面重复计数
-      - last_move: Move | None
-    """
+    def __setattr__(self, name, value):
+        if (hasattr(self, "_resolved") and name not in
+                {"_encoding", "_legal_mask", "_moves", "_outcome", "_resolved"}):
+            raise AttributeError("rule snapshots are immutable")
+        object.__setattr__(self, name, value)
 
-    __slots__ = ('board', 'turn', 'move_count', 'no_capture_count',
-                 'repetition_counts', 'last_move', '_max_ply',
-                 '_encoding', '_legal_mask')
-
-    def __init__(self, board: np.ndarray, turn,
-                 move_count=0, no_capture_count=0,
-                 repetition_counts=None, last_move=None,
-                 max_ply: int = None):
-        self.board = board
-        if isinstance(turn, str):
-            self.turn = (turn == "r")
-        else:
-            self.turn = bool(turn)
-        self.move_count = move_count
-        self.no_capture_count = no_capture_count
-        self.repetition_counts = repetition_counts if repetition_counts is not None else {}
+    def __init__(self, board, turn, move_count=0, no_capture_count=0,
+                 repetition_counts=None, last_move=None, max_ply=None, *,
+                 history=None, position_history=None, check_history=()):
+        original = np.asarray(board)
+        if (original.shape != (ROWS, COLS) or original.dtype.kind not in "iu"
+                or np.any(original < -7) or np.any(original > 7)):
+            raise ValueError("board must be a 10x9 matrix of pieces -7..7")
+        data = np.frombuffer(original.astype(np.int8).tobytes(), dtype=np.int8).reshape(ROWS,COLS)
+        self.board = data
+        self.turn = player_id(turn) == RED
+        self.move_count, self.no_capture_count = int(move_count), int(no_capture_count)
+        self._max_ply = MAX_GAME_PLY if max_ply is None else int(max_ply)
+        if min(self.move_count, self.no_capture_count) < 0 or self._max_ply < 1:
+            raise ValueError("invalid rule counters")
+        key = position_key(data, self.turn)
+        counts = dict(repetition_counts) if repetition_counts is not None else {key: 1}
+        self.repetition_counts = MappingProxyType(counts)
+        self.history = tuple(history) if history is not None else ((data.tobytes(), counts.get(key, 1)),)
+        self.position_history = tuple(position_history) if position_history is not None else (key,)
+        self.check_history = tuple(check_history)
         self.last_move = last_move
-        self._max_ply = max_ply if max_ply is not None else MAX_GAME_PLY
-        self._encoding = None  # 缓存
-        self._legal_mask = None  # 缓存
+        self._encoding = self._legal_mask = self._moves = self._outcome = None
+        self._resolved = False
 
-    def copy(self) -> 'GameState':
-        """浅拷贝（board 是 numpy 数组，apply 时会 copy）"""
-        return GameState(
-            self.board, self.turn, self.move_count,
-            self.no_capture_count, self.repetition_counts, self.last_move,
-            max_ply=self._max_ply,
-        )
+    @property
+    def current_player(self):
+        return RED if self.turn else BLACK
+
+    def copy(self):
+        return self
 
     @classmethod
-    def new_game(cls, max_ply: int = None) -> 'GameState':
-        """创建初始棋盘状态"""
-        if max_ply is None:
-            max_ply = MAX_GAME_PLY
-        board = create_initial_board()
-        key = position_key(board, True)
-        counts = {key: 1}
-        return cls(board, True, 0, 0, counts, None, max_ply=max_ply)
+    def new_game(cls, max_ply=None):
+        return cls(create_initial_board(), RED, max_ply=max_ply)
 
-    # ── 走法查询 ──
+    def legal_moves(self):
+        if self._moves is None:
+            # Move generator temporarily modifies this private workspace.
+            board = self.board.copy()
+            rows, cols = np.where(board * self.current_player > 0)
+            self._moves = tuple(Move(int(r), int(c), int(m["row"]), int(m["col"]))
+                                for r, c in zip(rows, cols)
+                                for m in get_valid_moves(board, int(r), int(c), self.turn))
+        return list(self._moves)
 
-    def legal_moves(self) -> list[Move]:
-        """当前局面所有合法走法"""
-        moves = []
-        sign = 1 if self.turn else -1
-        rows, cols = np.where(self.board * sign > 0)
-        for r, c in zip(rows, cols):
-            valid = get_valid_moves(self.board, int(r), int(c), self.turn)
-            for m in valid:
-                moves.append(Move(int(r), int(c), int(m["row"]), int(m["col"])))
-        return moves
-
-    def legal_actions(self) -> np.ndarray:
-        """当前局面所有合法动作索引"""
+    def legal_actions(self):
         return ActionEncoder.legal_actions(self.legal_moves())
 
-    def legal_mask(self) -> np.ndarray:
-        """返回 (8100,) bool 合法动作掩码。使用缓存。"""
-        if self._legal_mask is not None:
-            return self._legal_mask
-        self._legal_mask = ActionEncoder.legal_mask(self.legal_moves())
+    def legal_mask(self):
+        if self._legal_mask is None:
+            self._legal_mask = ActionEncoder.legal_mask(self.legal_moves())
+            self._legal_mask.flags.writeable = False
         return self._legal_mask
 
-    def is_legal(self, move: Move) -> bool:
-        """单步走法合法性校验"""
-        from .fast_chess import is_valid_move
-        return is_valid_move(
-            self.board,
-            (move.from_row, move.from_col),
-            (move.to_row, move.to_col),
-            self.turn,
-        )
+    def canonical_mask(self):
+        mask = self.legal_mask()
+        return mask if self.turn else mask[::-1].copy()
 
-    # ── 走法执行 ──
+    def canonical_policy(self, policy):
+        return np.asarray(policy) if self.turn else np.asarray(policy)[::-1].copy()
 
-    def apply(self, move: Move) -> 'GameState':
-        """执行走法，返回新状态（不修改自身）"""
-        action = ActionEncoder.encode(move)
-        return self.apply_action(action)
+    def is_legal(self, move):
+        return move in self.legal_moves()
 
-    def apply_action(self, action: int) -> 'GameState':
-        """执行动作，返回新状态
+    def apply(self, move):
+        if self.is_terminal() or not self.is_legal(move):
+            raise ValueError(f"illegal move or finished game: {move}")
+        board = self.board.copy()
+        captured = make_move(board, (move.from_row, move.from_col),
+                             (move.to_row, move.to_col))["captured"]
+        key = position_key(board, not self.turn)
+        counts = dict(self.repetition_counts)
+        counts[key] = counts.get(key, 0) + 1
+        history = ((board.tobytes(), counts[key]),) + self.history[:7]
+        return GameState(board, not self.turn, self.move_count + 1,
+                         0 if captured else self.no_capture_count + 1,
+                         counts, move, self._max_ply, history=history,
+                         position_history=self.position_history + (key,),
+                         check_history=self.check_history +
+                         ((self.current_player, bool(is_in_check(board, not self.turn))),))
 
-        Args:
-            action: 0..8099 动作索引
+    def apply_action(self, action):
+        return self.apply(ActionEncoder.decode(action))
 
-        Returns:
-            新的 GameState
+    def game_result(self):
+        if self._resolved:
+            return self._outcome
+        result = None
+        if not np.any(self.board == KING):
+            result = GameResult(BLACK, "king_captured")
+        elif not np.any(self.board == -KING):
+            result = GameResult(RED, "king_captured")
+        elif not self.legal_moves():
+            result = GameResult(-self.current_player, "no_legal_move")
+        else:
+            key = position_key(self.board, self.turn)
+            if self.repetition_counts.get(key, 0) >= 3:
+                occurrences = [i for i, k in enumerate(self.position_history) if k == key]
+                checkers = []
+                if len(occurrences) >= 3:
+                    cycle = self.check_history[occurrences[-3]:]
+                    for side in (RED, BLACK):
+                        checks = [check for mover, check in cycle if mover == side]
+                        if checks and all(checks):
+                            checkers.append(side)
+                result = (GameResult(-checkers[0], "perpetual_check") if len(checkers) == 1
+                          else GameResult(None, "repetition"))
+            elif self.no_capture_count >= 120:
+                result = GameResult(None, "no_capture")
+            elif self.move_count >= self._max_ply:
+                result = GameResult(None, "max_ply")
+        self._outcome, self._resolved = result, True
+        return result
 
-        Raises:
-            ValueError: 动作无效或非法
-        """
-        move = ActionEncoder.decode(action)
-        if move is None:
-            raise ValueError(f"Invalid action: {action}")
-        if not self.is_legal(move):
-            raise ValueError(f"Illegal move: {move}")
-
-        new_board = self.board.copy()
-        undo = make_move(new_board,
-                         (move.from_row, move.from_col),
-                         (move.to_row, move.to_col))
-        captured = undo["captured"]
-
-        new_turn = not self.turn
-        new_move_count = self.move_count + 1
-        new_no_capture = 0 if captured else self.no_capture_count + 1
-
-        # 更新重复计数
-        new_key = position_key(new_board, new_turn)
-        new_counts = update_repetition(self.repetition_counts, new_key)
-
-        return GameState(
-            board=new_board,
-            turn=new_turn,
-            move_count=new_move_count,
-            no_capture_count=new_no_capture,
-            repetition_counts=new_counts,
-            last_move=move,
-            max_ply=self._max_ply,
-        )
-
-    # ── 终局检测 ──
-
-    def game_result(self) -> Optional[GameResult]:
-        """检测游戏结果
-
-        Returns:
-            None: 未结束
-            GameResult: 红胜/黑胜/平局
-        """
-        # 1. 检查将/帅是否存在
-        has_red_king = np.any(self.board == KING)
-        has_black_king = np.any(self.board == -KING)
-
-        if not has_red_king:
-            return GameResult(BLACK, "king_captured")
-        if not has_black_king:
-            return GameResult(RED, "king_captured")
-
-        # 2. 检查重复局面
-        current_key = position_key(self.board, self.turn)
-        if is_repetition_draw(self.repetition_counts, current_key, REPETITION_LIMIT):
-            return GameResult(None, "repetition")
-
-        # 3. 检查最大步数
-        if self.move_count >= self._max_ply:
-            return GameResult(None, "max_ply")
-
-        # 4. 检查无合法走法（困毙）
-        if not self.has_any_valid_move():
-            # 无合法走法 = 当前方负
-            winner = BLACK if self.turn else RED
-            return GameResult(winner, "no_legal_move")
-
-        # 5. 检查自然限着（60步无吃子）
-        if self.no_capture_count >= 60:
-            return GameResult(None, "no_capture")
-
-        return None
-
-    def is_terminal(self) -> bool:
-        """是否终局"""
+    def is_terminal(self):
         return self.game_result() is not None
 
-    def result(self) -> Optional[float]:
-        """终局结果: +1=红胜, -1=黑胜, 0=和棋, None=未终局"""
-        r = self.game_result()
-        if r is None:
-            return None
-        if r.is_draw:
-            return 0.0
-        return 1.0 if r.winner == RED else -1.0
+    def result(self):
+        result = self.game_result()
+        return None if result is None else result.to_value(RED)
 
-    def result_for_player(self) -> Optional[float]:
-        """当前玩家视角的结果: +1=胜, -1=负, 0=平, None=未终局"""
-        r = self.game_result()
-        if r is None:
-            return None
-        return r.to_value(self.turn)
+    def result_for_player(self):
+        result = self.game_result()
+        return None if result is None else result.to_value(self.current_player)
 
-    def wdl_for_player(self) -> Optional[np.ndarray]:
-        """当前玩家视角的 WDL 向量"""
-        r = self.game_result()
-        if r is None:
-            return None
-        return r.to_wdl(self.turn)
+    def wdl_for_player(self):
+        result = self.game_result()
+        return None if result is None else result.to_wdl(self.current_player)
 
-    def has_any_valid_move(self) -> bool:
-        """检查当前方是否有任何合法走法"""
-        sign = 1 if self.turn else -1
-        rows, cols = np.where(self.board * sign > 0)
-        for r, c in zip(rows, cols):
-            if get_valid_moves(self.board, int(r), int(c), self.turn):
-                return True
-        return False
+    def has_any_valid_move(self):
+        return bool(self.legal_moves())
 
-    def is_in_check(self) -> bool:
-        """当前方是否被将军"""
-        return is_in_check(self.board, self.turn)
+    def is_in_check(self):
+        return bool(is_in_check(self.board, self.turn))
 
-    # ── 编码 ──
-
-    def encode(self) -> np.ndarray:
-        """编码为神经网络输入 (18, 10, 9) float32。使用缓存。
-
-        通道:
-          0-6:  己方棋子位 (王..兵)
-          7-13: 对方棋子位
-          14:   己方颜色标记 (全1)
-          15:   总步数 / max_ply
-          16:   无吃子步数 / 60
-          17:   将军标记
-        """
-        if self._encoding is not None:
-            return self._encoding
-
-        encoded = np.zeros((18, ROWS, COLS), dtype=np.float32)
-
-        my_sign = 1 if self.turn else -1
-        my_mask = self.board * my_sign > 0
-        opp_mask = self.board * my_sign < 0
-
-        # 己方棋子通道
-        for ptype in range(1, 8):
-            piece_mask = np.abs(self.board) == ptype
-            encoded[ptype - 1] = (piece_mask & my_mask).astype(np.float32)
-
-        # 对方棋子通道
-        for ptype in range(1, 8):
-            piece_mask = np.abs(self.board) == ptype
-            encoded[ptype + 6] = (piece_mask & opp_mask).astype(np.float32)
-
-        # 己方颜色标记
-        encoded[14] = 1.0
-
-        # 步数归一化
-        mp = self._max_ply
-        encoded[15] = min(self.move_count, mp) / mp
-        encoded[16] = min(self.no_capture_count, 60) / 60.0
-
-        # 将军标记
-        if is_in_check(self.board, self.turn):
-            encoded[17] = 1.0
-
-        self._encoding = encoded
-        return encoded
+    def encode(self):
+        if self._encoding is None:
+            encoded = np.zeros((INPUT_CHANNELS, ROWS, COLS), dtype=np.float32)
+            for frame, (raw, repetitions) in enumerate(self.history[:8]):
+                board = np.frombuffer(raw, dtype=np.int8).reshape(ROWS, COLS)
+                board = board if self.turn else board[::-1, ::-1]
+                board = board * self.current_player
+                for piece in range(1, 8):
+                    encoded[frame * 16 + piece - 1] = board == piece
+                    encoded[frame * 16 + piece + 6] = board == -piece
+                encoded[frame * 16 + 14] = repetitions >= 2
+                encoded[frame * 16 + 15] = repetitions >= 3
+            encoded[128] = self.turn
+            encoded[129] = self.move_count / self._max_ply
+            encoded[130] = min(self.no_capture_count, 120) / 120
+            encoded.flags.writeable = False
+            self._encoding = encoded
+        return self._encoding
 
     def __repr__(self):
-        turn_str = "红" if self.turn else "黑"
-        return f"GameState(turn={turn_str}, moves={self.move_count})"
+        return f"GameState(player={self.current_player}, ply={self.move_count})"

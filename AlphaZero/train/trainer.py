@@ -1,249 +1,164 @@
-"""训练器 — 从 ReplayBuffer 采样训练神经网络。
-
-损失函数:
-  L = policy_loss + wdl_loss + weight_decay
-  - policy_loss: CrossEntropy(MCTS_policy, predicted_policy)
-  - wdl_loss: CrossEntropy(wdl_target, wdl_logits)
-"""
-import time
+"""Continuous SGD learner: Scalar MSE, policy CE and half-L2, with explicit batch reduction contract."""
+from pathlib import Path
+import json
 import os
 import random
-from contextlib import nullcontext
-from pathlib import Path
-from typing import Optional
-
 import numpy as np
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
-
+from torch.nn import functional as F
 from .config import AlphaZeroConfig
-from .replay import ReplayBuffer
-from ..model import PolicyWDLEncoder
+from ..model.network import PolicyValueNetwork
+from ..model.neural_eval import autocast_context
 
+def atomic_torch_save(payload, path):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    try:
+        with temporary.open("wb") as stream:
+            torch.save(payload, stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        if os.name == "posix":
+            directory = os.open(path.parent, os.O_DIRECTORY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+def create_model(config, device):
+    model = PolicyValueNetwork(config.num_blocks, config.num_filters, config.input_channels).to(device)
+    if str(device).startswith("cuda") and config.channels_last:
+        model = model.to(memory_format=torch.channels_last)
+    return model
 
 class Trainer:
-    """AlphaZero 训练器。
-
-    职责:
-      - 从 ReplayBuffer 加载训练数据
-      - 执行多 epoch 训练
-      - 保存检查点
-    """
-
-    def __init__(self, config: AlphaZeroConfig, device: str = 'cpu'):
-        self.config = config
-        self.device = device
-
-        # 创建模型
-        self.model = PolicyWDLEncoder(
-            num_blocks=config.num_blocks,
-            num_filters=config.num_filters,
-        ).to(device)
-
-        # 优化器 — SGD + Momentum（对齐 AlphaZero 论文）
-        self.optimizer = torch.optim.SGD(
-            self.model.parameters(),
-            lr=config.learning_rate,
-            momentum=config.lr_momentum,
-            weight_decay=config.weight_decay,
-        )
-
-        # 学习率调度器
-        self.scheduler = torch.optim.lr_scheduler.StepLR(
-            self.optimizer,
-            step_size=config.lr_decay_step,
-            gamma=config.lr_decay_rate,
-        )
-
-        # 训练状态
+    def __init__(self, config: AlphaZeroConfig, device="cpu"):
+        self.config, self.device = config, device
+        self.model = create_model(config, device)
+        self.forward_model = torch.compile(self.model) if config.compile_model else self.model
+        self.optimizer = torch.optim.SGD(self.model.parameters(), lr=config.learning_rate,
+                                         momentum=config.lr_momentum, weight_decay=config.weight_decay)
+        self.global_optimizer_step = 0
         self.current_iteration = 0
-        self.train_losses: list[float] = []
-        self.policy_losses: list[float] = []
-        self.wdl_losses: list[float] = []
+        self.resume_config_changes = {}
 
-    def train(self, replay: ReplayBuffer,
-              epochs: Optional[int] = None) -> dict:
-        """执行一轮训练。
-
-        Args:
-            replay: 经验回放缓冲区
-            epochs: 覆盖配置中的 epochs（可选）
-
-        Returns:
-            dict: 训练统计信息
-        """
-        if len(replay) == 0:
-            print("ReplayBuffer 为空，跳过训练")
-            return {}
-
-        epochs = epochs or self.config.epochs_per_iteration
-        samples_per_epoch = self.config.samples_per_epoch
-
+    def step(self, replay):
         self.model.train()
-        t_start = time.perf_counter()
-        total_batches = 0
+        decay = sum(self.global_optimizer_step >= milestone for milestone in self.config.lr_milestones)
+        lr = self.config.learning_rate * self.config.lr_decay_rate ** decay
+        for group in self.optimizer.param_groups:
+            group["lr"] = lr
+        states, policies, values, _ = replay.sample(self.config.batch_size)
+        def transfer(array):
+            tensor = torch.from_numpy(array)
+            if str(self.device).startswith("cuda"):
+                tensor = tensor.pin_memory()
+            return tensor.to(self.device, non_blocking=True)
+        x, pi, z = transfer(states), transfer(policies), transfer(values)
+        if str(self.device).startswith("cuda") and self.config.channels_last:
+            x = x.contiguous(memory_format=torch.channels_last)
+        self.optimizer.zero_grad(set_to_none=True)
+        with autocast_context(self.device, self.config.precision):
+            logits, v = self.forward_model(x)
+        # Full action CE is intentional; legal masking is conditional inference.
+        policy_per_position = -(pi * F.log_softmax(logits.float(), dim=1)).sum(1)
+        policy_loss = getattr(policy_per_position, self.config.loss_reduction)()
+        value_loss = F.mse_loss(v.float(), z, reduction=self.config.loss_reduction)
+        loss = policy_loss + value_loss
+        regularization = (self.config.weight_decay / 2) * sum(
+            p.detach().square().sum() for p in self.model.parameters())
+        if not bool(torch.isfinite(loss + regularization)):
+            raise FloatingPointError("non-finite learner loss")
+        loss.backward()
+        # Fail closed; clipping would introduce a separate algorithmic choice.
+        finite = torch.stack([torch.isfinite(p.grad).all() for p in self.model.parameters()
+                              if p.grad is not None]).all()
+        if not bool(finite):
+            raise FloatingPointError("non-finite learner gradients")
+        self.optimizer.step()
+        updated = list(self.model.parameters()) + list(self.model.buffers()) + [value for state in self.optimizer.state.values()
+                    for value in state.values() if isinstance(value, torch.Tensor)]
+        if not bool(torch.stack([torch.isfinite(value).all() for value in updated]).all()):
+            raise FloatingPointError("non-finite parameters or optimizer state after SGD")
+        self.global_optimizer_step += 1
+        return dict(step=self.global_optimizer_step, loss=float(loss.detach() + regularization),
+                    data_loss=float(loss.detach()), data_loss_per_position=float(loss.detach()) / (self.config.batch_size if self.config.loss_reduction == "sum" else 1),
+                    regularization=float(regularization),
+                    policy_loss=float(policy_loss.detach()), value_loss=float(value_loss.detach()),
+                    lr=lr, replay_positions=len(replay))
 
-        for epoch in range(epochs):
-            epoch_policy_loss = 0.0
-            epoch_wdl_loss = 0.0
-            epoch_total_loss = 0.0
-            n_batches = 0
-
-            # Decode only the current mini-batch. A full epoch of dense
-            # 8100-action targets would otherwise duplicate hundreds of MB.
-            steps = max(1, (samples_per_epoch + self.config.batch_size - 1)
-                        // self.config.batch_size)
-            accum = max(1, self.config.grad_accum_steps)
-            self.optimizer.zero_grad(set_to_none=True)
-            for step in range(steps):
-                batch_n = min(self.config.batch_size,
-                              samples_per_epoch - step * self.config.batch_size)
-                states, policies, wdls, weights = replay.sample(batch_n)
-                batch_states = torch.from_numpy(states).to(self.device)
-                batch_policies = torch.from_numpy(policies).to(self.device)
-                batch_wdls = torch.from_numpy(wdls).to(self.device)
-                batch_weights = torch.from_numpy(weights).to(self.device)
-
-                # 前向传播
-                use_bf16 = (str(self.device).startswith('cuda') and
-                            torch.cuda.is_bf16_supported())
-                autocast = (torch.autocast(device_type='cuda', dtype=torch.bfloat16)
-                            if use_bf16 else nullcontext())
-                with autocast:
-                    p_logits, w_logits = self.model(batch_states)
-
-                # Policy loss: cross-entropy (加权)
-                log_probs = F.log_softmax(p_logits, dim=1)
-                policy_loss = -(batch_policies * log_probs).sum(dim=1)
-                policy_loss = (policy_loss * batch_weights).mean()
-
-                # WDL loss: cross-entropy (加权)
-                wdl_loss = F.cross_entropy(w_logits, batch_wdls, reduction='none')
-                wdl_loss = (wdl_loss * batch_weights).mean()
-
-                # 总损失
-                loss = policy_loss + wdl_loss
-                if not torch.isfinite(loss):
-                    raise FloatingPointError("non-finite training loss")
-
-                # 反向传播
-                (loss / accum).backward()
-                if (step + 1) % accum == 0 or step + 1 == steps:
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), 5.0)
-                    self.optimizer.step()
-                    self.optimizer.zero_grad(set_to_none=True)
-
-                epoch_total_loss += loss.item()
-                epoch_policy_loss += policy_loss.item()
-                epoch_wdl_loss += wdl_loss.item()
-                n_batches += 1
-                total_batches += 1
-
-                # 定期打印
-                if total_batches % self.config.log_interval == 0:
-                    print(f"\r  epoch {epoch+1}/{epochs} "
-                          f"| batch {n_batches} "
-                          f"| loss {loss.item():.4f} "
-                          f"(p:{policy_loss.item():.4f} w:{wdl_loss.item():.4f})",
-                          end="")
-
-            # Epoch 统计
-            avg_total = epoch_total_loss / max(n_batches, 1)
-            avg_policy = epoch_policy_loss / max(n_batches, 1)
-            avg_wdl = epoch_wdl_loss / max(n_batches, 1)
-            self.train_losses.append(avg_total)
-            self.policy_losses.append(avg_policy)
-            self.wdl_losses.append(avg_wdl)
-
-            print(f"\r  epoch {epoch+1}/{epochs} "
-                  f"| loss {avg_total:.4f} "
-                  f"(p:{avg_policy:.4f} w:{avg_wdl:.4f})")
-
-        # 更新学习率
-        self.scheduler.step()
-
-        elapsed = time.perf_counter() - t_start
-        stats = {
-            'epochs': epochs,
-            'batches': total_batches,
-            'avg_loss': np.mean(self.train_losses[-epochs:]),
-            'avg_policy_loss': np.mean(self.policy_losses[-epochs:]),
-            'avg_wdl_loss': np.mean(self.wdl_losses[-epochs:]),
-            'lr': self.scheduler.get_last_lr()[0],
-            'time': elapsed,
-        }
-
-        print(f"训练完成: {elapsed:.0f}s | "
-              f"loss {stats['avg_loss']:.4f} | "
-              f"lr {stats['lr']:.6f}")
-
+    def train(self, replay, updates=None):
+        stats = {}
+        for _ in range(updates or self.config.checkpoint_interval):
+            stats = self.step(replay)
         self.current_iteration += 1
         return stats
 
-    def save_checkpoint(self, path: Optional[str] = None,
-                        extra: Optional[dict] = None) -> str:
-        """保存模型检查点。"""
-        if path is None:
-            path = self.config.checkpoint_path / \
-                   f"model_iter{self.current_iteration:03d}.pt"
+    def actor_payload(self):
+        return dict(kind="actor", spec=self.config.spec, fingerprint=self.config.fingerprint,
+                    run_id=getattr(self, "run_id", None),
+                    config=self.config.to_dict(), step=self.global_optimizer_step,
+                    model_state_dict={k:v.detach().cpu().clone() for k,v in self.model.state_dict().items()})
 
-        path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
+    def export_actor(self, path):
+        # Finite training parameters do not guarantee finite evaluation (notably
+        # with running BN statistics). Reject a broken snapshot before publishing.
+        from ..engine import GameState
+        from ..model.neural_eval import NeuralEvaluator
+        was_training = self.model.training
+        try:
+            self.model.eval()
+            NeuralEvaluator(self.model, self.device, self.config.precision,
+                            self.config.channels_last).evaluate(GameState.new_game())
+        finally:
+            self.model.train(was_training)
+        atomic_torch_save(self.actor_payload(), path)
 
-        checkpoint = {
-            'model_state_dict': self.model.state_dict(),
-            'optimizer_state_dict': self.optimizer.state_dict(),
-            'scheduler_state_dict': self.scheduler.state_dict(),
-            'config': self.config.to_dict(),
-            'train_losses': self.train_losses,
-            'policy_losses': self.policy_losses,
-            'wdl_losses': self.wdl_losses,
-            'current_iteration': self.current_iteration,
-            'python_rng_state': random.getstate(),
-            'numpy_rng_state': np.random.get_state(),
-            'torch_rng_state': torch.get_rng_state(),
-            'cuda_rng_states': torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
-        }
-        if extra:
-            checkpoint.update(extra)
-
-        temporary = path.with_name(path.name + ".tmp")
-        torch.save(checkpoint, str(temporary))
-        os.replace(temporary, path)
-        print(f"Checkpoint 已保存: {path}")
+    def save_checkpoint(self, path=None, extra=None):
+        payload = self.actor_payload()
+        payload.update(kind="learner", optimizer_type="SGD",
+                       optimizer_state_dict=self.optimizer.state_dict(),
+                       current_iteration=self.current_iteration,
+                       python_rng_state=random.getstate(), numpy_rng_state=np.random.get_state(),
+                       torch_rng_state=torch.get_rng_state(),
+                       cuda_rng_states=[s.cpu() for s in torch.cuda.get_rng_state_all()]
+                       if str(self.device).startswith("cuda") else None,
+                       extra=extra or {})
+        path = path or self.config.checkpoint_path / "learner.pt"
+        atomic_torch_save(payload, path)
         return str(path)
 
-    def load_checkpoint(self, path: str) -> dict:
-        """加载模型检查点（兼容旧 Adam checkpoint 的优化器状态）。"""
-        state = torch.load(path, map_location=self.device, weights_only=False)
-        self.model.load_state_dict(state['model_state_dict'])
-
-        # 优化器状态：兼容旧版 Adam → 新版 SGD 迁移
-        try:
-            self.optimizer.load_state_dict(state['optimizer_state_dict'])
-        except (KeyError, ValueError, RuntimeError):
-            print("  优化器状态不兼容（旧版 Adam checkpoint），使用全新优化器从头开始")
-
-        if 'scheduler_state_dict' in state:
-            try:
-                self.scheduler.load_state_dict(state['scheduler_state_dict'])
-            except (KeyError, ValueError, RuntimeError):
-                pass
-
-        self.train_losses = state.get('train_losses', [])
-        self.policy_losses = state.get('policy_losses', [])
-        self.wdl_losses = state.get('wdl_losses', [])
-        self.current_iteration = state.get('current_iteration', 0)
-        if 'python_rng_state' in state:
-            random.setstate(state['python_rng_state'])
-        if 'numpy_rng_state' in state:
-            np.random.set_state(state['numpy_rng_state'])
-        if 'torch_rng_state' in state:
-            torch.set_rng_state(state['torch_rng_state'])
-        if torch.cuda.is_available() and state.get('cuda_rng_states'):
-            torch.cuda.set_rng_state_all(state['cuda_rng_states'])
-
-        print(f"加载 checkpoint: {path}")
-        return state
-
+    def load_checkpoint(self, path):
+        state = torch.load(path, map_location="cpu", weights_only=False)
+        if state.get("kind") != "learner" or state.get("optimizer_type") != "SGD":
+            raise ValueError("not a versioned SGD learner checkpoint; use explicit weight import/migration")
+        if state.get("fingerprint") != self.config.fingerprint:
+            raise ValueError("checkpoint model/rule/observation/target specification mismatch")
+        for key in ("batch_size", "loss_reduction", "learning_rate", "lr_momentum", "weight_decay",
+                    "lr_milestones", "lr_decay_rate", "c_puct", "pb_c_base",
+                    "dirichlet_alpha", "dirichlet_epsilon", "mcts_batch_size", "virtual_loss",
+                    "replay_window_games", "seed", "checkpoint_interval", "num_sampling_moves", "reuse_tree"):
+            if state["config"].get(key) != self.config.to_dict().get(key):
+                raise ValueError(f"resume changes training semantics: {key}")
+        self.model.load_state_dict(state["model_state_dict"], strict=True)
+        self.optimizer.load_state_dict(state["optimizer_state_dict"])
+        self.global_optimizer_step = state["step"]
+        self.current_iteration = state["current_iteration"]
+        random.setstate(state["python_rng_state"])
+        np.random.set_state(state["numpy_rng_state"])
+        torch.set_rng_state(state["torch_rng_state"].cpu())
+        if str(self.device).startswith("cuda") and state.get("cuda_rng_states") is not None:
+            torch.cuda.set_rng_state_all([s.cpu() for s in state["cuda_rng_states"]])
+        # Search budget changes affect future self-play, not checkpoint tensor
+        # compatibility. Keep the caller's config and record the transition.
+        previous = json.loads(json.dumps(state["config"]))
+        current = json.loads(json.dumps(self.config.to_dict()))
+        self.resume_config_changes = {
+            key: dict(old=previous.get(key), new=value)
+            for key, value in current.items() if previous.get(key) != value
+        }
+        return state.get("extra", {})

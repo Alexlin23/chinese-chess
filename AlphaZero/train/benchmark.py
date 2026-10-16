@@ -1,7 +1,7 @@
 """Paired-color match runner for independent strength checks."""
 from dataclasses import dataclass
 import argparse
-from math import sqrt
+from math import sqrt, log
 from typing import Callable
 import numpy as np
 
@@ -31,7 +31,7 @@ class MatchReport:
 
 
 def evaluate_agents(candidate: Agent, baseline: Agent, num_games: int,
-                    max_ply: int = 512, seed: int = 0) -> MatchReport:
+                    max_ply: int = 512, seed: int = 0, on_game=None) -> MatchReport:
     """Run paired colors with equal game budgets and report uncertainty."""
     if num_games < 2 or num_games % 2:
         raise ValueError("num_games must be a positive even number")
@@ -63,10 +63,17 @@ def evaluate_agents(candidate: Agent, baseline: Agent, num_games: int,
             score = 0.0
         by_color[color][outcome] += 1
         scores.append(score)
+        if on_game is not None:
+            on_game(dict(game=game+1, color=color, outcome=outcome, plies=state.move_count,
+                         reason=result.reason, score=score))
     scores = np.asarray(scores, dtype=np.float64)
     mean = float(scores.mean())
-    # Descriptive normal interval; report the raw counts and colors too.
-    margin = 1.959963984540054 * float(scores.std(ddof=1)) / sqrt(num_games)
+    # Bounded-score Hoeffding interval, assuming independent color pairs.
+    # A fixed deterministic starting position supplies no population sample:
+    # retain [0,1] instead of manufacturing confidence from repeated games.
+    margin = 1.0
+    if getattr(candidate, "stochastic", False) or getattr(baseline, "stochastic", False):
+        margin = sqrt(log(40.0) / (2 * (num_games // 2)))
     wins = sum(group['wins'] for group in by_color.values())
     losses = sum(group['losses'] for group in by_color.values())
     draws = sum(group['draws'] for group in by_color.values())
@@ -90,7 +97,11 @@ def checkpoint_agent(path: str, simulations: int = 64,
     model.load_state_dict(checkpoint['model_state_dict'])
     model.eval()
     search = MCTS(NeuralEvaluator(model, device),
-                  num_simulations=simulations)
+                  num_simulations=simulations,
+                  c_puct=config.get('c_puct', 1.25),
+                  pb_c_base=config.get('pb_c_base', 19652.0),
+                  batch_size=config.get('mcts_batch_size', 8),
+                  virtual_loss=config.get('virtual_loss', 3.0))
 
     def select(state, rng):
         move, _ = search.select_move(

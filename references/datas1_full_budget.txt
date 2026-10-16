@@ -1,0 +1,13 @@
+Training dashboard: http://127.0.0.1:8765
+Traceback (most recent call last):
+  File "/usr/lib/python3.10/runpy.py", line 196, in _run_module_as_main
+    return _run_code(code, main_globals, None,
+  File "/usr/lib/python3.10/runpy.py", line 86, in _run_code
+    exec(code, run_globals)
+  File "/mnt/d/project/Alphazero/references/full_budget_acceptance.py", line 14, in <module>
+    config.max_optimizer_steps=2
+  File "/mnt/d/project/Alphazero/AlphaZero/scripts/pipeline.py", line 50, in pipeline
+    return _pipeline(config, directory, max_iterations, resume, enable_monitor)
+  File "/mnt/d/project/Alphazero/AlphaZero/scripts/pipeline.py", line 157, in _pipeline
+    time.sleep(0.1)
+KeyboardInterrupt

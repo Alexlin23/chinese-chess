@@ -11,7 +11,7 @@ BOARD_SIZE: int = ROWS * COLS          # 90
 POLICY_SIZE: int = BOARD_SIZE * BOARD_SIZE  # 8100
 
 # ── 网络维度 ──
-INPUT_CHANNELS: int = 18
+INPUT_CHANNELS: int = 131  # 8 * (14 pieces + 2 repetitions) + 3 global planes
 WDL_SIZE: int = 3
 
 # ── 游戏规则 ──

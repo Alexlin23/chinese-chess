@@ -1,0 +1,17 @@
+# CUDA integration smoke only; budgets intentionally tiny, no strength claim.
+num_blocks: 2
+num_filters: 32
+num_simulations: 32
+mcts_batch_size: 1
+batch_size: 128
+checkpoint_interval: 10
+max_optimizer_steps: 100
+max_iterations: 10
+max_game_ply: 64
+num_workers: 4
+actor_processes: 2
+inference_batch_size: 64
+checkpoint_dir: AlphaZero/runs/cuda-smoke
+device: cuda
+precision: bf16
+telemetry_port: 8765

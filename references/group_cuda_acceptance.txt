@@ -1,0 +1,11 @@
+step=10 loss=7.49519 lr=0.2 games=4 positions=256 update=0.029s
+step=20 loss=6.36257 lr=0.2 games=4 positions=256 update=0.030s
+step=30 loss=5.79521 lr=0.2 games=4 positions=256 update=0.054s
+step=40 loss=5.01685 lr=0.2 games=4 positions=256 update=0.037s
+step=50 loss=4.81143 lr=0.2 games=4 positions=256 update=0.185s
+step=60 loss=4.60984 lr=0.2 games=4 positions=256 update=0.043s
+step=70 loss=4.40032 lr=0.2 games=4 positions=256 update=0.037s
+step=80 loss=4.21251 lr=0.2 games=4 positions=256 update=0.032s
+step=90 loss=4.13889 lr=0.2 games=4 positions=256 update=0.042s
+step=100 loss=4.08262 lr=0.2 games=4 positions=256 update=0.023s
+{'step': 100, 'games': 4, 'positions': 256}

@@ -1,501 +1,257 @@
-"""AlphaZero 训练管道 — 全并行 + 实时监控
-
-用法:
-    python -m AlphaZero.scripts.pipeline --config config/default.yaml
-    python -m AlphaZero.scripts.pipeline --config config/default.yaml --workers 16
-"""
-import sys
-import os
-import gc
-import time
+"""Continuous AlphaZero learner and independent self-play actors with a live browser."""
 import argparse
-from queue import Empty
-from pathlib import Path
-from datetime import datetime
+from contextlib import contextmanager
+import json
 import multiprocessing as mp
-from multiprocessing import Process, Queue, Event
-
+from pathlib import Path
+from queue import Empty
+import random
+import os
+import uuid
+import threading
+import time
 import numpy as np
 import torch
-
-_project_root = Path(__file__).parent.parent.parent
-sys.path.insert(0, str(_project_root))
-
-from AlphaZero.model import PolicyWDLEncoder, NeuralEvaluator
-from AlphaZero.search import MCTS
-from AlphaZero.train import AlphaZeroConfig, ReplayBuffer, Trainer
-from AlphaZero.train.arena import Arena
+from AlphaZero.train.config import AlphaZeroConfig
+from AlphaZero.train.trainer import Trainer
+from AlphaZero.train.replay import ReplayBuffer
 from AlphaZero.train.inference_server import InferenceServer
-from AlphaZero.train.self_play_worker import self_play_worker_fn
-from AlphaZero.train.monitor import monitor
-from AlphaZero.engine import GameState, RED, BLACK, ActionEncoder
+from AlphaZero.train.self_play_worker import self_play_group_fn
+from AlphaZero.train.live import LiveTraining
 
+@contextmanager
+def run_lock(directory):
+    stream = (directory / ".run.lock").open("a+")
+    try:
+        if __import__("os").name == "posix":
+            import fcntl
+            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        else:
+            import msvcrt
+            stream.write("0")
+            stream.flush()
+            stream.seek(0)
+            msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+    except OSError as exc:
+        stream.close()
+        raise RuntimeError("another learner owns this run directory") from exc
+    try:
+        (directory / "process.pid").write_text(str(os.getpid()) + "\n", encoding="utf-8")
+        yield
+    finally:
+        stream.close()
 
-def evaluate_vs_heuristic(model: PolicyWDLEncoder,
-                          config: AlphaZeroConfig,
-                          num_games: int,
-                          device: str) -> float:
-    """纯网络（温度=0，不用MCTS）快速评估AI vs 启发式胜率。
+def pipeline(config, max_iterations=None, checkpoint=None, resume=None,
+             output_dir=None, enable_monitor=True):
+    config.__post_init__()
+    if checkpoint is not None:
+        raise ValueError("legacy WDL/18-channel weights require explicit migration; fresh v3 run recommended")
+    directory = Path(output_dir or config.checkpoint_dir)
+    config.checkpoint_dir = str(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    with run_lock(directory):
+        return _pipeline(config, directory, max_iterations, resume, enable_monitor)
 
-    Returns:
-        AI胜率 [0, 1]，平局计 0.5。
-    """
-    from AlphaZero.engine.heuristic import heuristic_move
-
-    neural_eval = NeuralEvaluator(model, device)
-    ai_score = 0.0
-
-    for i in range(num_games):
-        state = GameState.new_game(max_ply=config.max_game_ply)
-        ai_is_red = (i % 2 == 0)
-
-        while not state.is_terminal():
-            is_ai_turn = (state.turn == ai_is_red)
-
-            if is_ai_turn:
-                # 纯网络 argmax，temperature=0，不用 MCTS
-                policy_probs, _ = neural_eval.evaluate(state)
-                best_action = int(np.argmax(policy_probs))
-                move = ActionEncoder.decode(best_action)
-            else:
-                move = heuristic_move(state)
-
-            if move is None:
-                break
-            state = state.apply(move)
-
-        result = state.game_result()
-        if result is not None:
-            if result.is_draw:
-                ai_score += 0.5
-            elif (ai_is_red and result.winner == RED) or \
-                 (not ai_is_red and result.winner == BLACK):
-                ai_score += 1.0
-
-    return ai_score / num_games
-
-
-def parallel_self_play(config: AlphaZeroConfig,
-                       model_path: str,
-                       num_workers: int,
-                       games_per_worker: int,
-                       device: str = 'cuda',
-                       opponent_mode: str = 'self',
-                       verbose: bool = True,
-                       replay: ReplayBuffer = None) -> ReplayBuffer:
-    """多进程并行自对弈"""
-    server = InferenceServer(
-        model_path=model_path,
-        device=device,
-        batch_size=config.inference_batch_size,
-        max_wait_ms=config.inference_wait_ms,
-        num_workers=num_workers,
-    )
-    server_pid = server.start()
-    if verbose:
-        print(f"  InferenceServer 已启动 (PID={server_pid}, device={device})")
-
-    result_queue = Queue(maxsize=max(2, num_workers * 2))
-    stop_event = Event()
+def _pipeline(config, directory, max_iterations, resume, enable_monitor):
+    if config.device == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("CUDA requested but unavailable; install a CUDA wheel or explicitly select CPU")
+    torch.set_num_threads(config.torch_threads)
+    random.seed(config.seed)
+    np.random.seed(config.seed)
+    torch.manual_seed(config.seed)
+    if config.device == "cuda":
+        torch.cuda.manual_seed_all(config.seed)
+        torch.backends.cudnn.benchmark = True
+    trainer = Trainer(config, config.device)
+    learner = directory / "learner.pt"
+    recovery = None
+    if resume:
+        recovery = trainer.load_checkpoint(resume)
+    elif learner.exists():
+        raise ValueError("learner.pt exists: use --resume explicitly or choose a new run directory")
+    replay = ReplayBuffer(directory / "replay.sqlite", config.replay_window_games, config.replay_cache_mb)
+    try:
+        replay.bind_spec(config.fingerprint)
+        if resume and (recovery.get("replay_run_id") != replay.run_id
+                       or recovery.get("replay_generation", -1) > replay.generation
+                       or replay.max_actor_step > trainer.global_optimizer_step):
+            raise ValueError("checkpoint/replay run or committed generation mismatch")
+    except BaseException:
+        replay.close()
+        raise
+    if replay.game_count and not resume:
+        replay.close()
+        raise ValueError("existing replay requires explicit resume; use a new directory for fresh training")
+    config_file = directory / "config.json.tmp"
+    config_file.write_text(json.dumps(config.to_dict(), indent=2), encoding="utf-8")
+    config_file.replace(directory / "config.json")
+    actor = directory / "latest.pt"
+    trainer.run_id = replay.run_id
+    trainer.export_actor(actor)
+    # Initial recovery point exists even if interrupted before the first update.
+    if not resume:
+        trainer.save_checkpoint(learner, replay.recovery_marker())
+    context = mp.get_context("spawn")
+    stop = context.Event()
+    collector_stop = threading.Event()
+    shutting_down = threading.Event()
+    results = context.Queue(maxsize=config.num_workers * 2)
+    events = context.Queue(maxsize=max(32, config.num_workers * 4))
+    server = InferenceServer(actor, config, context, replay.run_id)
     processes = []
-
-    for i in range(num_workers):
-        p = Process(
-            target=self_play_worker_fn,
-            args=(i, config, games_per_worker,
-                  server.request_queue, server.response_queues[i],
-                  result_queue, stop_event, opponent_mode),
-            daemon=True,
-        )
-        p.start()
-        processes.append(p)
-
-    if verbose:
-        print(f"  {num_workers} 个 SelfPlayWorker 已启动")
-
-    def stop_processes():
-        stop_event.set()
-        server.stop()
+    live = None
+    collector = None
+    errors = []
+    metrics = (directory / "metrics.jsonl").open("a", encoding="utf-8")
+    session_id = uuid.uuid4().hex
+    metrics.write(json.dumps(dict(event="session_start", session_id=session_id,
+        step=trainer.global_optimizer_step, run_id=replay.run_id, resumed=bool(resume),
+        config=config.to_dict(), config_changes=trainer.resume_config_changes)) + "\n")
+    metrics.flush()
+    try:
+        if enable_monitor:
+            live = LiveTraining(config.telemetry_host, config.telemetry_port, config.telemetry_interval)
+            host, port = live.address
+            print(f"Training dashboard: http://{host}:{port}", flush=True)
+            live.update(workers=config.num_workers, device=config.device, precision=config.precision,
+                        actor_processes=min(config.actor_processes, config.num_workers),
+                        actor_step=trainer.global_optimizer_step, step=trainer.global_optimizer_step,
+                        positions=len(replay), completed_games=replay.generation, config=config.to_dict())
+        ready = server.start()
+        sequences = replay.next_sequences()
+        process_count = min(config.actor_processes, config.num_workers)
+        for group in range(process_count):
+            worker_ids = list(range(group, config.num_workers, process_count))
+            process = context.Process(target=self_play_group_fn, args=(
+                worker_ids, config, server.request_queue,
+                {worker:server.response_queues[worker] for worker in worker_ids},
+                results, events, stop, sequences), daemon=True)
+            process.start()
+            processes.append(process)
+        def collect():
+            try:
+                while True:
+                    try:
+                        message = results.get(timeout=0.05)
+                        if message.get("kind") != "game":
+                            raise RuntimeError("invalid reliable worker message")
+                        replay.add_game(message["episode"], message["samples"],
+                            worker=message["worker"], sequence=message["sequence"],
+                            reason=message["reason"], actor_start=message["actor_start"],
+                            actor_end=message["actor_end"], trace=message["trace"])
+                        if live:
+                            live.complete(message, len(replay), replay.generation)
+                    except Empty:
+                        if collector_stop.is_set():
+                            break
+                    for _ in range(100):
+                        try:
+                            event = events.get_nowait()
+                        except Empty:
+                            break
+                        if live:
+                            live.event(event)
+                    failed = [(i,p.exitcode) for i,p in enumerate(processes)
+                              if p.exitcode is not None]
+                    if not shutting_down.is_set() and (failed or not server._process.is_alive() or stop.is_set()):
+                        raise RuntimeError(f"actor/inference process failed: {failed}")
+            except BaseException as exc:
+                errors.append(exc)
+                stop.set()
+                if live:
+                    live.update(phase="failed", errors=[dict(error=repr(exc))])
+        collector = threading.Thread(target=collect, daemon=True)
+        collector.start()
+        if live:
+            live.update(phase="collecting")
+        while replay.game_count < config.min_replay_games:
+            if errors:
+                raise errors[0]
+            time.sleep(0.1)
+        limit = min(config.max_optimizer_steps,
+                    (max_iterations or config.max_iterations) * config.checkpoint_interval)
+        if live:
+            live.update(phase="training")
+        while trainer.global_optimizer_step < limit:
+            if errors:
+                raise errors[0]
+            started = time.perf_counter()
+            stats = trainer.step(replay)
+            if errors:
+                raise errors[0]
+            stats["seconds"] = time.perf_counter() - started
+            stats["replay_generation"] = replay.generation
+            stats["run_id"] = replay.run_id
+            stats["session_id"] = session_id
+            stats["num_simulations"] = config.num_simulations
+            stats["generated_positions"] = replay.total_positions
+            stats["training_to_data_ratio"] = (trainer.global_optimizer_step * config.batch_size
+                                                / max(replay.total_positions, 1))
+            metrics.write(json.dumps(stats, allow_nan=False) + "\n")
+            metrics.flush()
+            if live:
+                live.update(**stats, positions=len(replay), completed_games=replay.generation)
+            step = trainer.global_optimizer_step
+            if step % config.recovery_interval == 0 and step % config.checkpoint_interval != 0:
+                trainer.save_checkpoint(learner, replay.recovery_marker())
+            if step % config.checkpoint_interval == 0 or step == limit:
+                trainer.current_iteration = step // config.checkpoint_interval
+                trainer.save_checkpoint(learner, replay.recovery_marker())
+                trainer.export_actor(actor)
+                server.refresh()
+                if live:
+                    live.update(actor_step=step)
+                print(f"step={step} loss={stats['loss']:.5f} lr={stats['lr']:.5g} "
+                      f"games={replay.generation} positions={len(replay)} "
+                      f"update={stats['seconds']:.3f}s", flush=True)
+    except BaseException as exc:
+        if live and not isinstance(exc, KeyboardInterrupt):
+            live.update(phase="failed", errors=[dict(error=repr(exc))])
+        raise
+    finally:
+        shutting_down.set()
+        stop.set()
         for process in processes:
-            process.join(timeout=5)
+            process.join(4)
             if process.is_alive():
                 process.terminate()
+                process.join(4)
+        collector_stop.set()
+        if collector:
+            collector.join(10)
+        server.stop()
+        for queue in (results, events):
+            queue.cancel_join_thread()
+            queue.close()
+        if live:
+            live.close()
+        metrics.close()
+        replay.flush()
+        replay.close()
+    return dict(step=trainer.global_optimizer_step, games=replay.generation, positions=len(replay))
 
-    if replay is None:
-        replay = ReplayBuffer(max_size=config.replay_buffer_size,
-                              max_bytes=config.replay_buffer_max_bytes,
-                              experiment_mode=opponent_mode)
-    workers_done = 0
-    total_stats = {'red': 0, 'black': 0, 'draw': 0, 'moves': 0, 'games': 0}
-    t_start = time.perf_counter()
-
-    while workers_done < num_workers:
-        try:
-            item = result_queue.get(timeout=5)
-        except Empty:
-            failed = [i for i, p in enumerate(processes)
-                      if p.exitcode is not None and p.exitcode != 0]
-            if failed or not server._process.is_alive():
-                stop_processes()
-                raise RuntimeError(f"self-play process failed: workers={failed}, "
-                                   f"inference_exit={server._process.exitcode}")
-            if all(not p.is_alive() for p in processes):
-                stop_processes()
-                raise RuntimeError(f"workers exited without completion: "
-                                   f"{workers_done}/{num_workers}")
-            continue
-
-        if (isinstance(item, tuple) and len(item) == 3
-                and isinstance(item[0], str) and item[0] == 'DONE'):
-            _, stats, _ = item
-            workers_done += 1
-            for k in ['red', 'black', 'draw', 'moves', 'games']:
-                total_stats[k] += stats[k]
-            if verbose:
-                elapsed = time.perf_counter() - t_start
-                print(f"  Worker {stats['worker_id']} 完成: "
-                      f"{stats['games']}局 {stats['moves']}步 "
-                      f"({stats['elapsed']:.0f}s) "
-                      f"[{workers_done}/{num_workers}]")
-        elif isinstance(item, tuple) and item[0] == 'GAME':
-            for sample in item[1]:
-                replay.add_packed(sample)
-        else:
-            stop_processes()
-            raise RuntimeError(f"unexpected worker message: {type(item)}")
-
-        # 更新监控
-        monitor.update(
-            phase='self_play',
-            workers=num_workers,
-            games_done=total_stats['games'],
-            games_total=games_per_worker * num_workers,
-            samples=len(replay),
-        )
-
-        # 每60秒打印一次进度估算 + GPU/CPU 状态
-        elapsed = time.perf_counter() - t_start
-        if verbose and elapsed > 0 and int(elapsed) % 60 < 2:
-            remaining_workers = num_workers - workers_done
-            if workers_done > 0:
-                avg_time_per_worker = elapsed / workers_done
-                eta = avg_time_per_worker * remaining_workers
-                # 获取 GPU/CPU 状态
-                import psutil
-                cpu_percent = psutil.cpu_percent(interval=0.1)
-                try:
-                    import subprocess
-                    gpu_result = subprocess.run(
-                        ['nvidia-smi', '--query-gpu=utilization.gpu,memory.used',
-                         '--format=csv,noheader,nounits'],
-                        capture_output=True, text=True, timeout=5)
-                    gpu_util, gpu_mem = gpu_result.stdout.strip().split(', ')
-                    gpu_info = f"GPU={gpu_util}%, MEM={int(gpu_mem)/1024:.1f}GB"
-                except:
-                    gpu_info = "GPU=N/A"
-                print(f"  [进度] Workers={workers_done}/{num_workers} "
-                      f"对局={total_stats['games']}/{games_per_worker * num_workers} "
-                      f"样本={len(replay)} "
-                      f"CPU={cpu_percent:.0f}% {gpu_info} "
-                      f"ETA={eta/60:.0f}min")
-
-    stop_processes()
-
-    elapsed = time.perf_counter() - t_start
-    if verbose:
-        total_games = total_stats['games']
-        total_moves = total_stats['moves']
-        print(f"  自对弈完成: {total_games}局 {total_moves}步 "
-              f"{elapsed:.0f}s ({elapsed/max(total_games,1):.1f}s/局)")
-        print(f"  R={total_stats['red']} B={total_stats['black']} "
-              f"D={total_stats['draw']} | {len(replay)} 样本")
-
-    return replay
-
-
-def pipeline(config: AlphaZeroConfig,
-             max_iterations: int = None,
-             checkpoint: str = None,
-             resume: str = None,
-             output_dir: str = None,
-             enable_monitor: bool = True):
-    """完整训练管道（全并行）"""
-    # 从config读取max_iterations，或使用默认值100
-    if max_iterations is None:
-        # 尝试从config获取（需要在config中添加这个字段）
-        max_iterations = getattr(config, 'max_iterations', 100)
-    output_dir = output_dir or config.checkpoint_dir
-    num_workers = config.num_workers or 4
-
-    out = Path(output_dir)
-    out.mkdir(parents=True, exist_ok=True)
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-
-    model = PolicyWDLEncoder(
-        num_blocks=config.num_blocks,
-        num_filters=config.num_filters,
-    ).to(device)
-    start = 0
-    loaded_from = None  # 记录加载来源
-
-    training_state_path = out / "latest_training.pt"
-    # 决定从哪个 checkpoint 加载
-    if resume is not None:
-        # 显式指定 --resume path
-        resume_path = str(out / "best.pt") if resume == '' else resume
-    elif checkpoint:
-        resume_path = checkpoint
-    else:
-        # Resume the full optimizer/scheduler state when available.
-        if training_state_path.exists():
-            resume_path = str(training_state_path)
-        else:
-            best_path = str(out / "best.pt")
-            resume_path = best_path if Path(best_path).exists() else None
-        if resume_path is None:
-            print("未找到已有模型，从头开始训练（随机初始化参数）")
-
-    if resume_path and Path(resume_path).exists():
-        ck = torch.load(resume_path, map_location=device, weights_only=False)
-        model.load_state_dict(ck['model_state_dict'])
-        loaded_from = resume_path
-        # 从文件名推断轮次：iter049.pt → 50, best.pt/latest.pt → 0
-        fname = Path(resume_path).stem
-        if fname.startswith('iter'):
-            try:
-                start = int(fname[4:]) + 1
-            except (ValueError, IndexError):
-                start = 0
-        print(f"恢复训练: {resume_path} (从第 {start} 轮继续)")
-    elif resume_path:
-        print(f"⚠ 未找到 checkpoint: {resume_path}，从头开始")
-
-    trainer = Trainer(config, device)
-    if loaded_from:
-        state = trainer.load_checkpoint(loaded_from)
-        start = trainer.current_iteration
-        model.load_state_dict(trainer.model.state_dict())
-
-    arena = Arena(config, device)
-    best_model_path = str(out / "best.pt")
-
-    if not Path(best_model_path).exists():
-        torch.save({'model_state_dict': model.state_dict(),
-                    'config': config.to_dict()}, best_model_path)
-
-    # 启动监控
-    if enable_monitor:
-        monitor.interval = config.monitor_interval
-        monitor.update(
-            iteration=start,
-            max_iterations=start + max_iterations,
-            workers=num_workers,
-            promoted=0,
-        )
-        monitor.start()
-
-    print(f"\n{'='*60}")
-    print(f"AlphaZero 并行训练管道")
-    print(f"{'='*60}")
-    print(f"模型: {model.count_parameters():,} 参数")
-    print(f"设备: {device}")
-    print(f"Workers: {num_workers}")
-    print(f"Iterations: {max_iterations}")
-    print(f"每轮: {config.games_per_iteration} 局自对弈 + {config.epochs_per_iteration} epochs")
-    print(f"Arena: {config.arena_games} 局, 晋升阈值 {config.promotion_score_rate}")
-    print(f"冷启动: vs启发式 {config.warmup_eval_games}局/轮, 阈值 {config.warmup_win_rate:.0%}, 最多 {config.warmup_max_iterations} 轮")
-    print(f"MCTS: {config.num_simulations} 模拟, c_puct={config.c_puct}")
-    print(f"训练: batch={config.batch_size}, lr={config.learning_rate}")
-    print(f"监控: {'开启' if enable_monitor else '关闭'}")
-    print(f"{'='*60}\n")
-
-    total_start = time.perf_counter()
-    history = []
-    total_promoted = 0
-    opponent_mode = (state.get('opponent_mode', config.experiment_mode)
-                     if loaded_from else config.experiment_mode)
-    if opponent_mode not in ('self', 'heuristic'):
-        raise ValueError(f"unsupported experiment mode: {opponent_mode}")
-    replay_path = out / f"replay_{opponent_mode}.npz"
-    replay = (ReplayBuffer.load(replay_path,
-                               max_size=config.replay_buffer_size,
-                               max_bytes=config.replay_buffer_max_bytes,
-                               experiment_mode=opponent_mode)
-              if replay_path.exists() else
-              ReplayBuffer(config.replay_buffer_size,
-                           config.replay_buffer_max_bytes,
-                           opponent_mode))
-
-    for it in range(start, start + max_iterations):
-        if replay.experiment_mode != opponent_mode:
-            replay_path = out / f"replay_{opponent_mode}.npz"
-            replay = (ReplayBuffer.load(
-                replay_path, config.replay_buffer_size,
-                config.replay_buffer_max_bytes, opponent_mode)
-                if replay_path.exists() else
-                ReplayBuffer(config.replay_buffer_size,
-                             config.replay_buffer_max_bytes, opponent_mode))
-        ts = datetime.now().strftime("%H:%M:%S")
-        model_path = str(out / "latest.pt")
-
-        # 保存当前模型供 self-play 使用
-        torch.save({'model_state_dict': model.state_dict(),
-                    'config': config.to_dict()}, model_path)
-
-        print(f"\n[{ts}] Iteration {it+1}/{start+max_iterations}")
-        print(f"{'─'*40}")
-
-        # 保存旧模型
-        model_old_path = str(out / f"iter{it:03d}_old.pt")
-        torch.save({'model_state_dict': model.state_dict()}, model_old_path)
-
-        # 更新监控
-        monitor.update(iteration=it+1, phase='self_play')
-
-        # Keep the bounded replay pool across iterations.
-        games_per_worker = max(1, config.games_per_iteration // num_workers)
-        replay = parallel_self_play(
-            config=config,
-            model_path=model_path,
-            num_workers=num_workers,
-            games_per_worker=games_per_worker,
-            device=device,
-            opponent_mode=opponent_mode,
-            replay=replay,
-        )
-        # Commit completed games before training, so a training crash does
-        # not discard self-play data already accepted by the parent process.
-        replay.save(replay_path)
-
-        # 更新监控
-        monitor.update(phase='training', loss=None)
-
-        # 训练
-        stats = trainer.train(replay, epochs=config.epochs_per_iteration)
-        model.load_state_dict(trainer.model.state_dict())
-
-        # 更新监控
-        monitor.update(loss=stats.get('avg_loss', 0))
-
-        # 保存候选模型
-        candidate_path = str(out / f"iter{it:03d}.pt")
-        torch.save({
-            'model_state_dict': model.state_dict(),
-            'config': config.to_dict(),
-            'stats': stats,
-        }, candidate_path)
-
-        # ── 暖机评估 / Arena ──
-        if opponent_mode == 'heuristic':
-            # 暖机阶段：评估 vs 启发式，判断是否切换
-            win_rate = evaluate_vs_heuristic(
-                model, config,
-                num_games=config.warmup_eval_games,
-                device=device,
-            )
-            print(f"  vs启发式胜率: {win_rate:.1%} "
-                  f"(阈值: {config.warmup_win_rate:.1%}, "
-                  f"轮次: {it - start + 1}/{config.warmup_max_iterations})")
-
-            if win_rate >= config.warmup_win_rate \
-               or it - start + 1 >= config.warmup_max_iterations:
-                opponent_mode = 'self'
-                reason = "胜率达标" if win_rate >= config.warmup_win_rate else "超过最大轮数"
-                print(f"  ✓ 切换到自我对弈（{reason}）")
-
-            # 暖机阶段跳过 Arena，直接保存为 best
-            total_promoted += 1
-            arena_result = {'wins': 0, 'losses': 0, 'draws': 0,
-                           'score_rate': 1.0, 'should_promote': True}
-            torch.save({'model_state_dict': model.state_dict(),
-                       'config': config.to_dict()},
-                       best_model_path)
-        else:
-            print(f"  Arena: {config.arena_games} 局 vs 旧模型...")
-            monitor.update(phase='arena', arena_w=0, arena_l=0, arena_d=0)
-
-            arena_result = arena.evaluate(candidate_path, best_model_path)
-            print(f"  结果: W={arena_result['wins']} L={arena_result['losses']} "
-                  f"D={arena_result['draws']} score={arena_result['score_rate']:.1%}")
-
-            # 更新监控
-            monitor.update(
-                arena_w=arena_result['wins'],
-                arena_l=arena_result['losses'],
-                arena_d=arena_result['draws'],
-            )
-
-            should_promote = arena_result['should_promote']
-            if should_promote:
-                print(f"  ✓ 晋升")
-                total_promoted += 1
-                torch.save({'model_state_dict': model.state_dict(),
-                            'config': config.to_dict()},
-                           best_model_path)
-            else:
-                print(f"  ✗ 回滚")
-                ck = torch.load(best_model_path, map_location=device)
-                model.load_state_dict(ck['model_state_dict'])
-                trainer.model.load_state_dict(ck['model_state_dict'])
-                trainer.optimizer.state.clear()
-
-        # 更新监控
-        monitor.update(promoted=total_promoted)
-
-        Path(model_old_path).unlink(missing_ok=True)
-
-        history.append({
-            'iteration': it, 'buffer_size': len(replay),
-            'arena': arena_result, **stats
-        })
-
-        torch.save({'model_state_dict': model.state_dict(),
-                    'config': config.to_dict()},
-                   str(out / "latest.pt"))
-        trainer.save_checkpoint(str(training_state_path),
-                                extra={'opponent_mode': opponent_mode,
-                                       'last_completed_iteration': it})
-
-    # 停止监控
-    monitor.stop()
-
-    total_elapsed = time.perf_counter() - total_start
-    print(f"\n{'='*60}")
-    print(f"训练完成: {len(history)} 轮, {total_elapsed/3600:.1f} 小时")
-    print(f"晋升: {total_promoted}/{len(history)}")
-    print(f"最佳模型: {best_model_path}")
-    print(f"{'='*60}")
-
-
-if __name__ == "__main__":
-    mp.set_start_method('spawn', force=True)
-    # Windows 默认 GBK 编码，无法输出 ✓ 等 Unicode 字符
-    if hasattr(sys.stdout, 'reconfigure'):
-        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
-
-    p = argparse.ArgumentParser(description="AlphaZero 并行训练管道")
-    p.add_argument("--config", type=str, default="config/default.yaml",
-                   help="YAML 配置文件路径")
-    p.add_argument("--checkpoint", type=str, default=None)
-    p.add_argument("--resume", type=str, nargs='?', const='', default=None,
-                   help="显式指定 checkpoint 路径。不指定则自动检测 best.pt")
-    p.add_argument("--output", type=str, default=None)
-    p.add_argument("--iterations", type=int, default=None)
-    p.add_argument("--workers", type=int, default=None, help="覆盖配置文件中的 workers")
-    p.add_argument("--no-monitor", action="store_true", help="禁用实时监控")
-    args = p.parse_args()
-
-    # 从 YAML 加载配置
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", default="config/default.yaml")
+    parser.add_argument("--output-dir")
+    parser.add_argument("--resume")
+    parser.add_argument("--max-iterations", type=int)
+    parser.add_argument("--workers", type=int, help="number of simultaneous independent games")
+    parser.add_argument("--actor-processes", type=int, help="CPU processes sharing the independent games")
+    parser.add_argument("--device", choices=("cpu", "cuda"))
+    parser.add_argument("--no-monitor", action="store_true")
+    args = parser.parse_args()
     config = AlphaZeroConfig.from_yaml(args.config)
-
-    # 命令行覆盖
     if args.workers is not None:
         config.num_workers = args.workers
+    if args.actor_processes is not None:
+        config.actor_processes = args.actor_processes
+    if args.device:
+        config.device = args.device
+    config.__post_init__()
+    result = pipeline(config, args.max_iterations, resume=args.resume,
+                      output_dir=args.output_dir, enable_monitor=not args.no_monitor)
+    print(json.dumps(result), flush=True)
 
-    print(f"配置文件: {args.config}")
-
-    pipeline(config=config, max_iterations=args.iterations,
-             checkpoint=args.checkpoint, resume=args.resume,
-             output_dir=args.output,
-             enable_monitor=not args.no_monitor)
-
+if __name__ == "__main__":
+    main()

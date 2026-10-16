@@ -1,0 +1,4 @@
+step=2 loss=9.45883 lr=0.2 games=2 positions=24 update=0.015s
+step=4 loss=9.13090 lr=0.2 games=2 positions=24 update=0.015s
+step=6 loss=8.17005 lr=0.2 games=2 positions=24 update=0.028s
+{'fresh': {'step': 4, 'games': 2, 'positions': 24}, 'resumed': {'step': 6, 'games': 2, 'positions': 24}}

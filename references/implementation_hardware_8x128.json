@@ -1,0 +1,27 @@
+{
+  "device": "cuda",
+  "torch": "2.8.0+cu128",
+  "batch": 4096,
+  "parameters": 4004603,
+  "updates": 2,
+  "seconds": 2.0760964099972625,
+  "stats": {
+    "step": 2,
+    "loss": 9.4666109085083,
+    "data_loss": 8.893718719482422,
+    "regularization": 0.5728921890258789,
+    "policy_loss": 8.794837951660156,
+    "value_loss": 0.09888076782226562,
+    "lr": 0.2,
+    "replay_positions": 4096
+  },
+  "bf16_vs_fp32": {
+    "policy_max_abs": 4.385225474834442e-05,
+    "value_abs": 0.00028640031814575195
+  },
+  "gpu": "NVIDIA GeForce RTX 5070",
+  "peak_allocated_gb": 3.876162052154541,
+  "peak_reserved_gb": 4.048828125,
+  "restore_equal": true,
+  "restored_step": 2
+}

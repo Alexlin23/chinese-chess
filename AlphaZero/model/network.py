@@ -1,197 +1,73 @@
-"""AlphaZero Policy-WDL 残差网络 — 中国象棋版
-
-架构:
-  输入: (B, 18, 10, 9) — GameState.encode() 输出
-  主体: ResBlock × N
-  Policy Head: Conv1×1 → FC → 8100 logits
-  WDL Head: Conv1×1 → FC → 3 logits (win/draw/loss)
-"""
+"""AlphaZero residual tower with policy logits and scalar tanh value."""
+import numpy as np
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
-
-from ..engine.constants import POLICY_SIZE, INPUT_CHANNELS, WDL_SIZE
-
+from torch import nn
+from torch.nn import functional as F
+from ..engine.constants import POLICY_SIZE, INPUT_CHANNELS
 
 class ResBlock(nn.Module):
-    """残差块：Conv3×3 → BN → ReLU → Conv3×3 → BN → SkipAdd → ReLU"""
-
-    def __init__(self, channels: int):
+    def __init__(self, channels):
         super().__init__()
         self.conv1 = nn.Conv2d(channels, channels, 3, padding=1, bias=False)
         self.bn1 = nn.BatchNorm2d(channels)
         self.conv2 = nn.Conv2d(channels, channels, 3, padding=1, bias=False)
         self.bn2 = nn.BatchNorm2d(channels)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        residual = x
-        out = F.relu(self.bn1(self.conv1(x)))
-        out = self.bn2(self.conv2(out))
-        out += residual
-        return F.relu(out)
+    def forward(self, x):
+        return F.relu(x + self.bn2(self.conv2(F.relu(self.bn1(self.conv1(x))))))
 
-
-class PolicyWDLEncoder(nn.Module):
-    """Policy-WDL 双头残差网络
-
-    Args:
-        num_blocks:  残差块数量
-        num_filters: 卷积层通道数
-        input_channels: 输入通道数（固定 18）
-    """
-
-    def __init__(self,
-                 num_blocks: int = 8,
-                 num_filters: int = 128,
-                 input_channels: int = INPUT_CHANNELS):
+class PolicyValueNetwork(nn.Module):
+    def __init__(self, num_blocks=19, num_filters=128, input_channels=INPUT_CHANNELS):
         super().__init__()
-        self.num_blocks = num_blocks
-        self.num_filters = num_filters
-
-        # ── 输入卷积 ──
-        self.conv_input = nn.Conv2d(
-            input_channels, num_filters, 3, padding=1, bias=False)
+        self.num_blocks, self.num_filters = num_blocks, num_filters
+        self.conv_input = nn.Conv2d(input_channels, num_filters, 3, padding=1, bias=False)
         self.bn_input = nn.BatchNorm2d(num_filters)
+        self.resblocks = nn.Sequential(*(ResBlock(num_filters) for _ in range(num_blocks)))
+        # Flat policy is an alternative investigated in the authors' Methods.
+        self.policy_conv = nn.Conv2d(num_filters, 2, 1, bias=False)
+        self.policy_bn = nn.BatchNorm2d(2)
+        self.policy_fc = nn.Linear(2 * 90, POLICY_SIZE)
+        self.value_conv = nn.Conv2d(num_filters, 1, 1, bias=False)
+        self.value_bn = nn.BatchNorm2d(1)
+        self.value_fc1 = nn.Linear(90, 256)
+        self.value_fc2 = nn.Linear(256, 1)
 
-        # ── 残差塔 ──
-        self.resblocks = nn.Sequential(*[
-            ResBlock(num_filters) for _ in range(num_blocks)
-        ])
+    def forward(self, x):
+        x = self.resblocks(F.relu(self.bn_input(self.conv_input(x))))
+        p = F.relu(self.policy_bn(self.policy_conv(x))).flatten(1)
+        v = F.relu(self.value_bn(self.value_conv(x))).flatten(1)
+        v = torch.tanh(self.value_fc2(F.relu(self.value_fc1(v)))).squeeze(-1)
+        return self.policy_fc(p), v
 
-        # ── Policy Head ──
-        # Conv1×1 降维 → FC → 8100 logits
-        self.policy_conv = nn.Conv2d(num_filters, 32, 1, bias=False)
-        self.policy_bn = nn.BatchNorm2d(32)
-        policy_flat_size = 32 * 10 * 9  # 2880
-        self.policy_fc1 = nn.Linear(policy_flat_size, 512)
-        self.policy_fc2 = nn.Linear(512, POLICY_SIZE)
+    def count_parameters(self):
+        return sum(p.numel() for p in self.parameters())
 
-        # ── WDL Head ──
-        # Conv1×1 → FC → 3 logits
-        self.wdl_conv = nn.Conv2d(num_filters, 32, 1, bias=False)
-        self.wdl_bn = nn.BatchNorm2d(32)
-        wdl_flat_size = 32 * 10 * 9  # 2880
-        self.wdl_fc1 = nn.Linear(wdl_flat_size, 256)
-        self.wdl_fc2 = nn.Linear(256, WDL_SIZE)
-
-        # 权重初始化
-        self._init_weights()
-
-    def _init_weights(self):
-        """Kaiming 初始化 + BatchNorm 初始化为 1/0"""
-        for m in self.modules():
-            if isinstance(m, nn.Conv2d):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out',
-                                        nonlinearity='relu')
-            elif isinstance(m, nn.BatchNorm2d):
-                nn.init.constant_(m.weight, 1.0)
-                nn.init.constant_(m.bias, 0.0)
-            elif isinstance(m, nn.Linear):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out',
-                                        nonlinearity='relu')
-                if m.bias is not None:
-                    nn.init.constant_(m.bias, 0.0)
-
-    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Args:
-            x: (B, 18, 10, 9) float32 — 棋盘编码
-
-        Returns:
-            (policy_logits, wdl_logits):
-              - policy_logits: (B, 8100) — 走法 logits
-              - wdl_logits:    (B, 3)    — win/draw/logits
-        """
-        # ── 输入卷积 ──
-        x = F.relu(self.bn_input(self.conv_input(x)))
-
-        # ── 残差塔 ──
-        x = self.resblocks(x)
-
-        # ── Policy Head ──
-        p = F.relu(self.policy_bn(self.policy_conv(x)))
-        p = p.flatten(1)               # (B, 2880)
-        p = F.relu(self.policy_fc1(p))  # (B, 512)
-        p_logits = self.policy_fc2(p)   # (B, 8100)
-
-        # ── WDL Head ──
-        w = F.relu(self.wdl_bn(self.wdl_conv(x)))
-        w = w.flatten(1)               # (B, 2880)
-        w = F.relu(self.wdl_fc1(w))    # (B, 256)
-        w_logits = self.wdl_fc2(w)     # (B, 3)
-
-        return p_logits, w_logits
-
-    def count_parameters(self) -> int:
-        """可训练参数总数"""
-        return sum(p.numel() for p in self.parameters() if p.requires_grad)
-
-    @torch.no_grad()
-    def evaluate_state(self, state_encoding: torch.Tensor,
-                       legal_mask: torch.Tensor = None) -> tuple:
-        """评估单个局面，返回 (policy_probs, wdl_probs, value)。
-
-        Args:
-            state_encoding: (1, 18, 10, 9) 或 (18, 10, 9)
-            legal_mask: (8100,) bool 可选，合法动作掩码
-
-        Returns:
-            policy_probs: (8100,) numpy float32
-            wdl_probs: (3,) numpy float32
-            value: float = P(win) - P(loss)
-        """
-        was_training = self.training
-        self.eval()
-        if state_encoding.dim() == 3:
-            state_encoding = state_encoding.unsqueeze(0)
-        p_logits, w_logits = self.forward(state_encoding)
-
-        # Policy: 应用合法动作掩码后 softmax (clone 避免 inplace 问题)
-        p_logits = p_logits.squeeze(0).clone()  # (8100,)
-        if legal_mask is not None:
-            p_logits[~legal_mask] = float('-inf')
-        policy_probs = F.softmax(p_logits, dim=0).cpu().numpy()
-
-        # WDL: softmax
-        wdl_probs = F.softmax(w_logits.squeeze(0), dim=0).cpu().numpy()
-
-        # Value = P(win) - P(loss)
-        value = float(wdl_probs[0] - wdl_probs[2])
-
-        if was_training:
-            self.train()
-        return policy_probs, wdl_probs, value
-
-    @torch.no_grad()
-    def evaluate_batch(self, state_batch: torch.Tensor,
-                       legal_masks: torch.Tensor = None) -> tuple:
-        """批量评估局面。
-
-        Args:
-            state_batch: (B, 18, 10, 9)
-            legal_masks: (B, 8100) bool 可选
-
-        Returns:
-            policy_probs: (B, 8100) numpy float32
-            wdl_probs: (B, 3) numpy float32
-            values: (B,) numpy float32
-        """
-        was_training = self.training
-        self.eval()
-        p_logits, w_logits = self.forward(state_batch)
-
-        # Policy: 应用掩码后 softmax (clone 避免 inplace 问题)
-        p_logits = p_logits.clone()
+    @torch.inference_mode()
+    def evaluate_batch(self, states, legal_masks=None, forward_model=None):
+        if self.training:
+            raise RuntimeError("inference requires eval mode")
+        logits, values = (forward_model if forward_model is not None else self)(states)
+        logits = logits.float()
+        if not torch.isfinite(logits).all():
+            raise FloatingPointError("non-finite neural logits")
         if legal_masks is not None:
-            p_logits[~legal_masks] = float('-inf')
-        policy_probs = F.softmax(p_logits, dim=1).cpu().numpy()
+            if not legal_masks.any(dim=1).all():
+                raise ValueError("terminal/empty legal set sent for neural inference")
+            logits = logits.masked_fill(~legal_masks, -torch.inf)
+        policies = logits.softmax(1).cpu().numpy()
+        values = values.float().cpu().numpy()
+        if not np.isfinite(policies).all() or not np.isfinite(values).all():
+            raise FloatingPointError("non-finite neural output")
+        # Middle return retained for old callers; it is NOT a learned WDL head.
+        return policies, None, values
 
-        # WDL: softmax
-        wdl_probs = F.softmax(w_logits, dim=1).cpu().numpy()
+    def evaluate_state(self, state, legal_mask=None):
+        if state.ndim == 3:
+            state = state.unsqueeze(0)
+        if legal_mask is not None and legal_mask.ndim == 1:
+            legal_mask = legal_mask.unsqueeze(0)
+        policies, _, values = self.evaluate_batch(state, legal_mask)
+        return policies[0], None, float(values[0])
 
-        # Value = P(win) - P(loss)
-        values = wdl_probs[:, 0] - wdl_probs[:, 2]
-
-        if was_training:
-            self.train()
-        return policy_probs, wdl_probs, values
+# Import compatibility only. Old WDL checkpoints are intentionally incompatible.
+PolicyWDLEncoder = PolicyValueNetwork

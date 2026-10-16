@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AlphaZero · 训练实况</title><link rel="stylesheet" href="/training.css"></head>
+<body>
+<header><div><div class="eyebrow">ALPHAZERO / XIANGQI</div><h1>训练实况 <span class="live-dot"></span></h1>
+<p>每一盘，都是正在发生的自我对弈。</p></div><div class="connection" id="connection" role="status">正在连接…</div></header>
+<main>
+<section class="metrics" aria-label="训练指标">
+<div><span>同时对弈</span><strong id="active">0</strong><small id="workers">等待训练进程</small></div>
+<div><span>已完成对局</span><strong id="games">0</strong><small id="positions">0 个回放局面</small></div>
+<div><span>优化步数</span><strong id="step">0</strong><small id="actor">生成模型 · 0</small></div>
+<div><span>训练损失</span><strong id="loss">—</strong><small id="lossDetail">等待首个更新</small></div>
+</section>
+<section class="hardware" aria-label="计算资源"><span id="gpu">GPU · 读取中</span><span id="vram">显存 · —</span>
+<span id="cpu">CPU · —</span><span id="ram">内存 · —</span></section>
+<section class="section-title"><div><h2>对弈现场</h2><span id="phase">准备中</span></div>
+<label>棋盘大小 <select id="density"><option value="normal">标准</option><option value="compact">紧凑</option><option value="large">宽松</option></select></label></section>
+<div id="empty" class="empty"><div class="empty-symbol">棋</div><h3>等待对局开始</h3><p>训练进程启动后，所有并发棋盘会自动出现在这里。</p></div>
+<section id="boards" class="boards" aria-label="所有正在进行的训练对局"></section>
+<section id="errors" class="errors" hidden aria-live="polite"></section>
+<footer><span id="rule">规则状态 · 读取中</span><span>只读观测 · 页面断开不影响训练</span></footer>
+</main><script src="/training.js" defer></script>
+</body></html>

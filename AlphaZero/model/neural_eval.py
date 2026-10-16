@@ -1,63 +1,36 @@
-"""神经网络评估器 — 用于 MCTS 搜索"""
+"""Current-player coordinates at the network boundary; absolute actions in the tree."""
+from contextlib import nullcontext
 import numpy as np
 import torch
-import torch.nn.functional as F
 
-from ..engine.state import GameState
-from ..engine.move import ActionEncoder
-from ..engine.constants import POLICY_SIZE
-from .network import PolicyWDLEncoder
-
+def autocast_context(device, precision):
+    if str(device).startswith("cuda") and precision == "bf16":
+        if not torch.cuda.is_bf16_supported():
+            raise RuntimeError("requested BF16 is unsupported on this device")
+        return torch.autocast("cuda", dtype=torch.bfloat16)
+    return nullcontext()
 
 class NeuralEvaluator:
-    """神经网络评估器，实现 Evaluator 协议
-
-    使用 PolicyWDLEncoder 评估局面，返回 masked policy 和 WDL value。
-    """
-
-    def __init__(self, model: PolicyWDLEncoder, device: str = 'cpu'):
-        self.model = model
-        self.device = device
+    def __init__(self, model, device="cpu", precision="fp32", channels_last=False, forward_model=None):
+        self.model, self.device = model, device
+        self.precision, self.channels_last = precision, channels_last
+        self.forward_model = forward_model
         self.model.eval()
 
-    def evaluate(self, state: GameState) -> tuple[np.ndarray, float]:
-        """评估单个局面
+    def evaluate(self, state):
+        policies, values = self.evaluate_batch([state])
+        return policies[0], float(values[0])
 
-        Returns:
-            policy_probs: (8100,) float32 合法动作概率
-            value: float = P(win) - P(loss)
-        """
-        # 编码局面
-        state_enc = state.encode()
-        state_tensor = torch.from_numpy(state_enc).unsqueeze(0).to(self.device)
-
-        # 获取合法动作掩码
-        legal_mask = state.legal_mask()
-        legal_tensor = torch.from_numpy(legal_mask).to(self.device)
-
-        # 推理
-        policy_probs, wdl_probs, value = self.model.evaluate_state(
-            state_tensor, legal_tensor)
-
-        return policy_probs, value
-
-    def evaluate_batch(self, states: list[GameState]) -> tuple[np.ndarray, np.ndarray]:
-        """批量评估局面
-
-        Returns:
-            policies: (B, 8100) float32
-            values: (B,) float32
-        """
-        # 编码局面
-        state_encs = np.stack([s.encode() for s in states])
-        state_tensor = torch.from_numpy(state_encs).to(self.device)
-
-        # 获取合法动作掩码
-        legal_masks = np.stack([s.legal_mask() for s in states])
-        legal_tensor = torch.from_numpy(legal_masks).to(self.device)
-
-        # 推理
-        policy_probs, wdl_probs, values = self.model.evaluate_batch(
-            state_tensor, legal_tensor)
-
-        return policy_probs, values
+    def evaluate_batch(self, states):
+        if not states:
+            raise ValueError("empty inference batch")
+        tensor = torch.from_numpy(np.stack([state.encode() for state in states])).to(self.device)
+        masks = torch.from_numpy(np.stack([state.canonical_mask() for state in states])).to(self.device)
+        if self.channels_last:
+            tensor = tensor.contiguous(memory_format=torch.channels_last)
+        with autocast_context(self.device, self.precision):
+            policies, _, values = self.model.evaluate_batch(tensor, masks, forward_model=self.forward_model)
+        for i, state in enumerate(states):
+            if not state.turn:
+                policies[i] = policies[i, ::-1].copy()
+        return policies, values

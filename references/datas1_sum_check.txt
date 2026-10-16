@@ -1,0 +1,18 @@
+Traceback (most recent call last):
+  File "/usr/lib/python3.10/runpy.py", line 196, in _run_module_as_main
+    return _run_code(code, main_globals, None,
+  File "/usr/lib/python3.10/runpy.py", line 86, in _run_code
+    exec(code, run_globals)
+  File "/mnt/d/project/Alphazero/AlphaZero/scripts/runtime_check.py", line 72, in <module>
+    main()
+  File "/mnt/d/project/Alphazero/AlphaZero/scripts/runtime_check.py", line 54, in main
+    fp_policy, fp_value = NeuralEvaluator(trainer.model, "cuda", "fp32", True).evaluate(state)
+  File "/mnt/d/project/Alphazero/AlphaZero/model/neural_eval.py", line 20, in evaluate
+    policies, values = self.evaluate_batch([state])
+  File "/mnt/d/project/Alphazero/AlphaZero/model/neural_eval.py", line 31, in evaluate_batch
+    policies, _, values = self.model.evaluate_batch(tensor, masks)
+  File "/home/lin/.venvs/xiangqi-alphazero/lib/python3.10/site-packages/torch/utils/_contextlib.py", line 120, in decorate_context
+    return func(*args, **kwargs)
+  File "/mnt/d/project/Alphazero/AlphaZero/model/network.py", line 58, in evaluate_batch
+    raise FloatingPointError("non-finite neural output")
+FloatingPointError: non-finite neural output

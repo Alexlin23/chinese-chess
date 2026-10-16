@@ -1,0 +1,307 @@
+{
+  "mate_on_limit": {
+    "legal": true,
+    "opponent_legal_moves": 0,
+    "capped_result": {
+      "winner": null,
+      "reason": "max_ply"
+    },
+    "normal_result": {
+      "winner": 1,
+      "reason": "no_legal_move"
+    }
+  },
+  "history_alias": {
+    "same_initial_encoding": true,
+    "result_one_visit": null,
+    "result_two_visits": {
+      "winner": null,
+      "reason": "repetition"
+    }
+  },
+  "all_draw_ci": {
+    "draws": 2,
+    "interval": [
+      0.5,
+      0.5
+    ]
+  },
+  "prior_mass": 1.0977272727272698,
+  "web_state_reset": {
+    "expected_move_count": 4,
+    "expected_no_capture_count": 4,
+    "expected_repetition_positions": 4,
+    "move_count": 0,
+    "no_capture_count": 0,
+    "repetition_positions": 0
+  },
+  "torch_version": "2.8.0+cpu",
+  "cuda_available": false,
+  "fresh_initialization": {
+    "current_iteration": 0,
+    "tensors_different": 9,
+    "old_files": [
+      "iter000_old.pt"
+    ]
+  },
+  "resume_iteration_file": {
+    "current_iteration": 0,
+    "tensors_different": 0,
+    "old_files": [
+      "iter000_old.pt"
+    ]
+  },
+  "gradient_remainder": {
+    "gradients": [
+      -0.9998765587806702,
+      -0.4999382793903351
+    ],
+    "ratio": 0.5,
+    "optimizer_steps": 2,
+    "scheduler_steps": 1
+  },
+  "adam_migration": "KeyError('momentum')",
+  "arena_repetition": {
+    "games": 4,
+    "same_red_trajectory": true,
+    "same_black_trajectory": true,
+    "unique_trajectories": 1
+  },
+  "cpu_inference": {
+    "errors": [
+      null,
+      null
+    ],
+    "ids": [
+      1,
+      2
+    ],
+    "max_policy_error": 5.587935447692871e-09
+  },
+  "cpu_selfplay": {
+    "samples": 8
+  },
+  "cpu_training": {
+    "loss": 14.32509708404541,
+    "batches": 2
+  },
+  "cpu_restore": {
+    "iteration": 1,
+    "equal_parameters": true
+  },
+  "rollback_learning_gate": {
+    "rounds": 2,
+    "same_generator_in_both_rounds": true,
+    "candidate_changes_discarded": true,
+    "final_equals_initial_generator": true,
+    "note": "Real SGD training; controlled all-draw Arena results, not a strength result"
+  },
+  "parameter_counts": {
+    "default": {
+      "body": 306432,
+      "policy": 5632484,
+      "value": 740419,
+      "total": 6679335
+    },
+    "test_yaml": {
+      "body": 23655424,
+      "policy": 5638628,
+      "value": 746563,
+      "total": 30040615
+    }
+  },
+  "ignored_input_channels": {
+    "config": 131,
+    "actual": 18
+  },
+  "ignored_yaml_fields": {
+    "lr_decay_step": 100000,
+    "lr_decay_rate": 0.1,
+    "repetition_limit": 3
+  },
+  "policy_probability_contract": {
+    "full_loss": 1.0986123085021973,
+    "legal_only_loss": 0.6931471824645996,
+    "full_gradient": [
+      -0.6666666865348816,
+      0.3333333134651184,
+      0.3333333134651184
+    ],
+    "legal_only_gradient": [
+      -0.5,
+      0.5,
+      0.0
+    ],
+    "naive_masked_loss_is_nan": true
+  },
+  "mcts_budget_accounting": [
+    {
+      "batch": 1,
+      "root_visits": 64,
+      "child_visits": 64.0,
+      "root_visit_conservation": true,
+      "all_counts_nonnegative_integers": true,
+      "network_batches": [
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ],
+      "policy_sum": 1.0
+    },
+    {
+      "batch": 16,
+      "root_visits": 64,
+      "child_visits": 64.0,
+      "root_visit_conservation": true,
+      "all_counts_nonnegative_integers": true,
+      "network_batches": [
+        16,
+        16,
+        16,
+        16
+      ],
+      "policy_sum": 1.0
+    },
+    {
+      "batch": 64,
+      "root_visits": 64,
+      "child_visits": 67.0,
+      "root_visit_conservation": false,
+      "all_counts_nonnegative_integers": true,
+      "network_batches": [
+        44,
+        20
+      ],
+      "policy_sum": 1.0
+    }
+  ],
+  "mcts_forced_reply_reservations": {
+    "legal_moves": 1,
+    "root_visits": 64,
+    "child_visits": 67.0,
+    "network_batches": [
+      1,
+      15,
+      14,
+      12,
+      11
+    ]
+  },
+  "terminal_select_move": {
+    "terminal": true,
+    "move": "Move(0,0→0,0)",
+    "legal": false,
+    "policy_sum": 0.0
+  },
+  "color_contract": {
+    "black_constant": -1,
+    "constructor_black_becomes_red": true,
+    "black_win_for_false": -1.0,
+    "black_win_for_black": 1.0
+  },
+  "action_roundtrip": true,
+  "replay_negative_policy": {
+    "accepted": true,
+    "stored_negative": false
+  },
+  "sample_byte_accounting": {
+    "reported": 522,
+    "shallow_object_bytes_excluding_scalars": 715
+  },
+  "corrupt_replay": {
+    "load_succeeded": true,
+    "sampled_policy_finite": false
+  },
+  "replay_sampling_median_ms": {
+    "1000": 2.7360459998817532,
+    "100000": 6.294325000453682
+  },
+  "stale_web_move": {
+    "first_accepted": true,
+    "stale_accepted": true,
+    "colors": [
+      "r",
+      "r"
+    ],
+    "first_move_undone_in_board": true
+  },
+  "undo_nonatomic": {
+    "remaining_moves": 1,
+    "board_unchanged": true
+  },
+  "manual_movement_fixtures": {
+    "checks": 27,
+    "failures": []
+  },
+  "extended_rule_differential": {
+    "positions": 300,
+    "mismatches": 0,
+    "scope": "Two in-repository implementations; not an independent rules oracle"
+  },
+  "nonfinite_inference_response": {
+    "error": null,
+    "finite_policies": false,
+    "finite_values": false
+  }
+}

@@ -1,147 +1,200 @@
-"""Byte-bounded replay storage with compact boards and sparse policies."""
-from collections import deque
+"""Disk-backed FIFO of complete games. Uniform position sampling, bounded SQLite cache."""
 from dataclasses import dataclass
 from pathlib import Path
 import os
+import sqlite3
+import threading
+import uuid
 import numpy as np
+from .config import OBSERVATION_VERSION, ACTION_VERSION, RULE_VERSION, TARGET_VERSION, ALGORITHM_VERSION
 from ..engine.constants import POLICY_SIZE
-from ..engine.state import GameState
 
+VERSION = "|".join((ALGORITHM_VERSION, OBSERVATION_VERSION, ACTION_VERSION, RULE_VERSION, TARGET_VERSION))
 
 @dataclass
 class PackedSample:
-    board: bytes
-    turn: bool
-    move_count: int
-    no_capture_count: int
-    max_ply: int
-    actions: np.ndarray
-    probabilities: np.ndarray
-    wdl_index: int
-    weight: float
+    planes: bytes
+    globals: bytes
+    actions: bytes
+    probabilities: bytes
+    value: float
 
     @property
     def nbytes(self):
-        # Include a conservative allowance for Python objects and deque refs.
-        return len(self.board) + self.actions.nbytes + self.probabilities.nbytes + 256
+        return len(self.planes) + len(self.globals) + len(self.actions) + len(self.probabilities) + 128
 
+    def validate(self):
+        actions = np.frombuffer(self.actions, dtype="<u2")
+        probabilities = np.frombuffer(self.probabilities, dtype="<f4")
+        if len(self.planes) != 1440 or len(self.globals) != 12:
+            raise ValueError("wrong observation format")
+        if (not len(actions) or len(actions) != len(probabilities)
+                or np.any(actions >= POLICY_SIZE) or len(np.unique(actions)) != len(actions)
+                or not np.isfinite(probabilities).all() or np.any(probabilities < 0)
+                or not np.isclose(probabilities.sum(), 1, atol=1e-5)):
+            raise ValueError("invalid sparse policy")
+        if not np.isfinite(self.value) or abs(self.value) > 1:
+            raise ValueError("invalid scalar target")
+        if not np.isfinite(np.frombuffer(self.globals, dtype="<f4")).all():
+            raise ValueError("invalid global planes")
 
-def pack_sample(state: GameState, policy: np.ndarray,
-                wdl: np.ndarray, weight: float = 1.0) -> PackedSample:
-    policy = np.asarray(policy)
-    if policy.shape != (POLICY_SIZE,) or not np.all(np.isfinite(policy)):
-        raise ValueError("policy must be a finite (8100,) vector")
-    actions = np.flatnonzero(policy > 0).astype(np.uint16)
-    if len(actions) == 0:
-        raise ValueError("policy has no positive action")
-    probabilities = policy[actions].astype(np.float16)
-    if probabilities.sum(dtype=np.float32) <= 0:
-        raise ValueError("policy underflows float16 storage")
-    return PackedSample(
-        np.asarray(state.board, dtype=np.int8).tobytes(), bool(state.turn),
-        int(state.move_count), int(state.no_capture_count), int(state._max_ply),
-        actions, probabilities, int(np.argmax(wdl)), float(weight))
-
+def pack_sample(state, policy, value, weight=1.0):
+    policy = np.asarray(policy, dtype=np.float32)
+    if (policy.shape != (POLICY_SIZE,) or not np.isfinite(policy).all()
+            or np.any(policy < 0) or not np.isclose(policy.sum(), 1, atol=1e-5)):
+        raise ValueError("policy must be a finite normalized nonnegative vector")
+    if weight != 1:
+        raise ValueError("paper baseline uses uniform sampling without sample weights")
+    value = np.asarray(value)
+    if value.shape == (3,):  # Import helper, never a learned WDL training objective.
+        value = value[0] - value[2]
+    canonical = state.canonical_policy(policy)
+    actions = np.flatnonzero(canonical)
+    encoding = state.encode()
+    packed = PackedSample(np.packbits(encoding[:128].astype(np.uint8)).tobytes(),
+                          encoding[128:, 0, 0].astype("<f4").tobytes(),
+                          actions.astype("<u2").tobytes(),
+                          canonical[actions].astype("<f4").tobytes(), float(value))
+    packed.validate()
+    return packed
 
 class ReplayBuffer:
-    """FIFO replay bounded by sample count and stored bytes."""
-
-    def __init__(self, max_size: int = 100_000,
-                 max_bytes: int = 512 * 1024 * 1024,
-                 experiment_mode: str = 'self'):
-        if max_size < 1 or max_bytes < 1:
+    def __init__(self, path=":memory:", window_games=1000000, cache_mb=256):
+        self.path, self.window_games = str(path), window_games
+        if window_games < 1 or cache_mb < 1:
             raise ValueError("replay limits must be positive")
-        self.max_size, self.max_bytes = max_size, max_bytes
-        if experiment_mode not in ('self', 'heuristic'):
-            raise ValueError("invalid experiment mode")
-        self.experiment_mode = experiment_mode
-        self.samples = deque()
-        self.byte_size = 0
+        if self.path != ":memory:":
+            Path(self.path).parent.mkdir(parents=True, exist_ok=True)
+        self.lock = threading.RLock()
+        self.db = sqlite3.connect(self.path, check_same_thread=False, timeout=30)
+        self.db.execute("PRAGMA journal_mode=WAL")
+        self.db.execute("PRAGMA synchronous=FULL")
+        self.db.execute("PRAGMA foreign_keys=ON")
+        self.db.execute(f"PRAGMA cache_size={-cache_mb * 1024}")
+        self.db.executescript("""
+            CREATE TABLE IF NOT EXISTS metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS games(
+                id INTEGER PRIMARY KEY AUTOINCREMENT, episode TEXT UNIQUE NOT NULL,
+                worker INTEGER NOT NULL, sequence INTEGER NOT NULL, reason TEXT NOT NULL,
+                actor_start INTEGER NOT NULL, actor_end INTEGER NOT NULL, trace TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS positions(
+                id INTEGER PRIMARY KEY AUTOINCREMENT, game INTEGER NOT NULL REFERENCES games(id) ON DELETE CASCADE,
+                planes BLOB NOT NULL, globals BLOB NOT NULL, actions BLOB NOT NULL,
+                probabilities BLOB NOT NULL, value REAL NOT NULL);
+            CREATE INDEX IF NOT EXISTS positions_game ON positions(game);
+        """)
+        row = self.db.execute("SELECT value FROM metadata WHERE key='version'").fetchone()
+        if row and row[0] != VERSION:
+            raise ValueError("incompatible replay schema/rules/targets")
+        self.db.execute("INSERT OR IGNORE INTO metadata VALUES('version',?)", (VERSION,))
+        self.db.execute("INSERT OR IGNORE INTO metadata VALUES('run_id',?)", (str(uuid.uuid4()),))
+        self.db.commit()
+        self.run_id = self.db.execute("SELECT value FROM metadata WHERE key='run_id'").fetchone()[0]
+        self._refresh()
 
-    def add_packed(self, sample: PackedSample):
-        if sample.nbytes > self.max_bytes:
-            raise ValueError("single sample exceeds replay byte budget")
-        while self.samples and (len(self.samples) >= self.max_size or
-                                self.byte_size + sample.nbytes > self.max_bytes):
-            self.byte_size -= self.samples.popleft().nbytes
-        self.samples.append(sample)
-        self.byte_size += sample.nbytes
+    def _refresh(self):
+        self.count, self.low, self.high = self.db.execute(
+            "SELECT COUNT(*),MIN(id),MAX(id) FROM positions").fetchone()
+        self.game_count = self.db.execute("SELECT COUNT(*) FROM games").fetchone()[0]
+        if self.count and self.high - self.low + 1 != self.count:
+            raise ValueError("replay position IDs are not contiguous")
+        self.generation = self.db.execute("SELECT COALESCE(MAX(id),0) FROM games").fetchone()[0]
+        row = self.db.execute("SELECT value FROM metadata WHERE key='max_actor_step'").fetchone()
+        self.max_actor_step = int(row[0]) if row else 0
+        row = self.db.execute("SELECT value FROM metadata WHERE key='total_positions'").fetchone()
+        self.total_positions = int(row[0]) if row else self.count
 
-    def add(self, state: GameState, policy: np.ndarray, wdl: np.ndarray,
-            weight: float = 1.0):
-        self.add_packed(pack_sample(state, policy, wdl, weight))
+    def bind_spec(self, fingerprint):
+        with self.lock, self.db:
+            row = self.db.execute("SELECT value FROM metadata WHERE key='fingerprint'").fetchone()
+            if row and row[0] != fingerprint:
+                raise ValueError("replay run specification mismatch")
+            self.db.execute("INSERT OR IGNORE INTO metadata VALUES('fingerprint',?)", (fingerprint,))
 
-    def sample(self, n: int):
-        if not self.samples:
-            raise ValueError("Buffer is empty")
-        items = list(self.samples)
-        weights = np.asarray([s.weight for s in items], dtype=np.float64)
-        if not np.all(np.isfinite(weights)) or np.any(weights < 0) or weights.sum() <= 0:
-            raise ValueError("invalid replay weights")
-        indices = np.random.choice(len(items), size=n, replace=True,
-                                   p=weights / weights.sum())
-        states = np.empty((n, 18, 10, 9), dtype=np.float32)
+    def recovery_marker(self):
+        with self.lock:
+            return dict(replay_generation=self.generation, replay_run_id=self.run_id,
+                        recovery_policy="keep committed replay; resume learner step")
+
+    def next_sequences(self):
+        with self.lock:
+            return {int(key.split(':')[1]): int(value) for key, value in self.db.execute(
+                "SELECT key,value FROM metadata WHERE key LIKE 'worker:%'")}
+
+    def add_game(self, episode, samples, *, worker=0, sequence=0, reason="unknown",
+                 actor_start=0, actor_end=0, trace="[]"):
+        if not samples:
+            raise ValueError("cannot commit empty episode")
+        for sample in samples:
+            sample.validate()
+        with self.lock, self.db:
+            if self.db.execute("SELECT 1 FROM games WHERE episode=?", (episode,)).fetchone():
+                return False
+            game = self.db.execute("INSERT INTO games(episode,worker,sequence,reason,actor_start,actor_end,trace) "
+                                   "VALUES(?,?,?,?,?,?,?)",
+                                   (episode, worker, sequence, reason, actor_start, actor_end, trace)).lastrowid
+            self.db.execute("INSERT OR REPLACE INTO metadata VALUES(?,?)",
+                            (f"worker:{worker}", str(sequence + 1)))
+            max_actor_step = max(self.max_actor_step, actor_end)
+            self.db.execute("INSERT OR REPLACE INTO metadata VALUES('max_actor_step',?)",
+                            (str(max_actor_step),))
+            total_positions = self.total_positions + len(samples)
+            self.db.execute("INSERT OR REPLACE INTO metadata VALUES('total_positions',?)",
+                            (str(total_positions),))
+            self.db.executemany("INSERT INTO positions(game,planes,globals,actions,probabilities,value) "
+                                "VALUES(?,?,?,?,?,?)",
+                                ((game, s.planes, s.globals, s.actions, s.probabilities, s.value)
+                                 for s in samples))
+            self.db.execute("DELETE FROM games WHERE id<=?", (game - self.window_games,))
+            # SQLite COUNT(*) would scan the full replay every game.
+            self.low = self.db.execute("SELECT id FROM positions ORDER BY id LIMIT 1").fetchone()[0]
+            self.high = self.db.execute("SELECT id FROM positions ORDER BY id DESC LIMIT 1").fetchone()[0]
+            self.count = self.high - self.low + 1 if self.high else 0
+            self.game_count = min(self.game_count + 1, self.window_games)
+            self.generation = game
+            self.max_actor_step = max_actor_step
+            self.total_positions = total_positions
+        return True
+
+    def sample(self, n, rng=None):
+        if n < 1:
+            raise ValueError("batch size must be positive")
+        rng = rng if rng is not None else np.random
+        with self.lock:
+            if not self.count:
+                raise ValueError("replay is empty")
+            ids = (rng.integers(self.low, self.high + 1, size=n) if hasattr(rng, "integers")
+                   else rng.randint(self.low, self.high + 1, size=n))
+            unique = np.unique(ids)
+            rows = {}
+            for start in range(0, len(unique), 500):
+                chunk = [int(i) for i in unique[start:start+500]]
+                sql = "SELECT id,planes,globals,actions,probabilities,value FROM positions WHERE id IN (" + ",".join("?" * len(chunk)) + ")"
+                rows.update({row[0]: row[1:] for row in self.db.execute(sql, chunk)})
+        states = np.empty((n, 131, 10, 9), dtype=np.float32)
         policies = np.zeros((n, POLICY_SIZE), dtype=np.float32)
-        wdls = np.zeros((n, 3), dtype=np.float32)
-        batch_weights = np.empty(n, dtype=np.float32)
-        for i, index in enumerate(indices):
-            s = items[index]
-            board = np.frombuffer(s.board, dtype=np.int8).reshape(10, 9)
-            state = GameState(board, s.turn, s.move_count,
-                              s.no_capture_count, max_ply=s.max_ply)
-            states[i] = state.encode()
-            probs = s.probabilities.astype(np.float32)
-            policies[i, s.actions] = probs / probs.sum()
-            wdls[i, s.wdl_index] = 1.0
-            batch_weights[i] = s.weight
-        return states, policies, wdls, batch_weights
+        values = np.empty(n, dtype=np.float32)
+        # Decode each sampled position once; repeated samples still occupy their
+        # original batch slots and keep exactly the same uniform sampling law.
+        order = np.argsort(ids)
+        boundaries = np.flatnonzero(np.diff(ids[order])) + 1
+        for destinations in np.split(order, boundaries):
+            planes, globals_, actions, probabilities, value = rows[int(ids[destinations[0]])]
+            PackedSample(planes, globals_, actions, probabilities, value).validate()
+            states[destinations, :128] = np.unpackbits(np.frombuffer(planes, dtype=np.uint8)).reshape(128,10,9)
+            states[destinations, 128:] = np.frombuffer(globals_, dtype="<f4")[:,None,None]
+            policies[destinations[:,None], np.frombuffer(actions, dtype="<u2")[None,:]] = np.frombuffer(probabilities, dtype="<f4")
+            values[destinations] = value
+        return states, policies, values, np.ones(n, dtype=np.float32)
 
     def __len__(self):
-        return len(self.samples)
+        with self.lock:
+            return self.count
 
-    def save(self, path: str):
-        """Write numeric arrays atomically; loading never requires pickle."""
-        path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        items = list(self.samples)
-        offsets = np.zeros(len(items) + 1, dtype=np.int64)
-        for i, sample in enumerate(items):
-            offsets[i + 1] = offsets[i] + len(sample.actions)
-        temporary = path.with_name(path.name + ".tmp.npz")
-        with open(temporary, "wb") as out:
-            np.savez_compressed(
-                out,
-                boards=np.frombuffer(b"".join(s.board for s in items), dtype=np.int8).reshape(-1, 10, 9),
-                turns=np.asarray([s.turn for s in items], dtype=np.bool_),
-                move_counts=np.asarray([s.move_count for s in items], dtype=np.int32),
-                no_capture_counts=np.asarray([s.no_capture_count for s in items], dtype=np.int32),
-                max_plies=np.asarray([s.max_ply for s in items], dtype=np.int32),
-                offsets=offsets,
-                actions=np.concatenate([s.actions for s in items]) if items else np.array([], dtype=np.uint16),
-                probabilities=np.concatenate([s.probabilities for s in items]) if items else np.array([], dtype=np.float16),
-                wdl_indices=np.asarray([s.wdl_index for s in items], dtype=np.uint8),
-                weights=np.asarray([s.weight for s in items], dtype=np.float32),
-                experiment_mode=np.asarray(self.experiment_mode),
-            )
-            out.flush()
-            os.fsync(out.fileno())
-        os.replace(temporary, path)
+    def flush(self):
+        with self.lock:
+            self.db.execute("PRAGMA wal_checkpoint(PASSIVE)")
 
-    @classmethod
-    def load(cls, path: str, max_size: int = 100_000,
-             max_bytes: int = 512 * 1024 * 1024,
-             experiment_mode: str = 'self'):
-        buffer = cls(max_size, max_bytes, experiment_mode)
-        with np.load(path, allow_pickle=False) as data:
-            if str(data['experiment_mode']) != experiment_mode:
-                raise ValueError("replay experiment mode does not match training mode")
-            offsets = data['offsets']
-            for i in range(len(data['turns'])):
-                lo, hi = int(offsets[i]), int(offsets[i + 1])
-                buffer.add_packed(PackedSample(
-                    data['boards'][i].tobytes(), bool(data['turns'][i]),
-                    int(data['move_counts'][i]), int(data['no_capture_counts'][i]),
-                    int(data['max_plies'][i]), data['actions'][lo:hi].copy(),
-                    data['probabilities'][lo:hi].copy(),
-                    int(data['wdl_indices'][i]), float(data['weights'][i])))
-        return buffer
+    def close(self):
+        with self.lock:
+            self.db.close()

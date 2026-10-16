@@ -1,250 +1,185 @@
-"""MCTS 核心搜索 — Leaf-Parallel Batch 版本
-
-关键优化:
-  1. 串行选择 batch_size 个叶节点
-  2. 收集后一次 batch evaluate（GPU batch 推理）
-  3. 批量回传结果
-"""
+"""Leaf-batched AlphaZero PUCT with exactly-once reservation release."""
 import numpy as np
-
-from ..engine.move import ActionEncoder
-from ..engine.state import GameState
 from ..engine.constants import POLICY_SIZE
+from ..engine.move import ActionEncoder
 from .node import MCTSNode
-from .evaluator import Evaluator
-
 
 class MCTS:
-    """Leaf-Parallel Batch MCTS。
+    def __init__(self, evaluator, num_simulations=800, c_puct=1.25,
+                 dirichlet_alpha=0.3, dirichlet_epsilon=0.25,
+                 batch_size=1, virtual_loss=0.0, pb_c_base=19652.0, rng=None, reuse_tree=False,
+                 cache_states=True):
+        if num_simulations < 1 or batch_size < 1 or virtual_loss < 0:
+            raise ValueError("invalid search budget/reservation")
+        self.evaluator, self.num_simulations = evaluator, num_simulations
+        self.c_puct, self.pb_c_base = c_puct, pb_c_base
+        self.dirichlet_alpha, self.dirichlet_epsilon = dirichlet_alpha, dirichlet_epsilon
+        self.batch_size, self.virtual_loss = batch_size, virtual_loss
+        self.rng = rng if rng is not None else np.random
+        self.reuse_tree = reuse_tree
+        self.cache_states = cache_states
+        self.last_root = None
+        self._reuse_root = self._reuse_state = None
+        self.diagnostics = {}
 
-    每轮:
-      1. 串行选择 batch_size 个叶节点
-      2. batch evaluate 所有叶节点
-      3. 批量回传
-    """
+    def _release(self, path):
+        for node, _ in path[1:]:
+            node.visit_count -= self.virtual_loss
+            node.total_value -= self.virtual_loss
 
-    def __init__(self,
-                 evaluator: Evaluator,
-                 num_simulations: int = 800,
-                 c_puct: float = 1.5,
-                 dirichlet_alpha: float = 0.3,
-                 dirichlet_epsilon: float = 0.25,
-                 batch_size: int = 32,
-                 virtual_loss: float = 3.0):
-        self.evaluator = evaluator
-        self.num_simulations = num_simulations
-        self.c_puct = c_puct
-        self.dirichlet_alpha = dirichlet_alpha
-        self.dirichlet_epsilon = dirichlet_epsilon
-        self.batch_size = batch_size
-        self.virtual_loss = virtual_loss
-
-    def search(self, root_state: GameState,
-               temperature: float = 1.0,
-               add_exploration_noise: bool = True) -> np.ndarray:
-        """执行完整搜索，返回 (8100,) 策略分布。"""
-        if root_state.is_terminal():
-            return np.zeros(POLICY_SIZE, dtype=np.float32)
-
-        # 创建根节点并扩展
-        root = MCTSNode(prior=1.0)
-        self._expand(root, root_state)
-
-        # 添加 Dirichlet 噪声到根节点
-        legal_moves = root_state.legal_moves()
-        if add_exploration_noise and len(legal_moves) > 1:
-            legal_actions = ActionEncoder.legal_actions(legal_moves)
-            noise = np.random.dirichlet(
-                [self.dirichlet_alpha] * len(legal_actions)
-            )
-            for i, idx in enumerate(legal_actions):
-                if idx in root.children:
-                    root.children[idx].prior = (
-                        (1 - self.dirichlet_epsilon) * root.children[idx].prior
-                        + self.dirichlet_epsilon * noise[i]
-                    )
-
-        # ── Batch 搜索 ──
-        sims_done = 0
-        while sims_done < self.num_simulations:
-            batch_count = min(self.batch_size, self.num_simulations - sims_done)
-
-            # 1) 串行选择 batch_count 个叶节点
-            leaves = []
-            pending_nodes = set()
-            for _ in range(batch_count):
-                leaf = self._select_leaf(root, root_state, pending_nodes)
-                if leaf is not None:
-                    leaves.append(leaf)
-                    if not leaf[3]:
-                        pending_nodes.add(id(leaf[0]))
+    def _select_leaf(self, root, root_state, pending_nodes=None):
+        node, state, path = root, root_state, []
+        try:
+            while node.is_expanded() and not state.is_terminal():
+                action = node.select_child(self.c_puct, self.pb_c_base)
+                path.append((node, action))
+                node = node.children[action]
+                node.visit_count += self.virtual_loss
+                node.total_value += self.virtual_loss
+                if self.cache_states and node.rule_state is not None:
+                    state = node.rule_state
                 else:
-                    # No other leaf is available until this batch is expanded.
-                    break
-
-            if not leaves:
-                break
-
-            # 2) 分离终局和非终局
-            terminal_leaves = [l for l in leaves if l[3]]
-            nonterminal_leaves = [l for l in leaves if not l[3]]
-
-            # 终局节点直接回传
-            # _backup 从叶节点视角开始，自动交替翻转符号
-            for node, state, path, is_term, term_val in terminal_leaves:
-                self._backup(path, term_val, root)
-
-            # 非终局节点 batch evaluate
-            if nonterminal_leaves:
-                states = [s for _, s, _, _, _ in nonterminal_leaves]
-                policies, values = self.evaluator.evaluate_batch(states)
-
-                for i, (node, state, path, _, _) in enumerate(nonterminal_leaves):
-                    policy = policies[i]
-                    value = float(values[i])
-
-                    # 扩展节点
-                    legal_moves = state.legal_moves()
-                    legal_actions = ActionEncoder.legal_actions(legal_moves)
-                    uniform_prior = 1.0 / max(len(legal_actions), 1)
-                    for idx in legal_actions:
-                        node.children[int(idx)] = MCTSNode(
-                            prior=float(max(policy[idx], uniform_prior * 0.1)))
-
-                    # _backup 从叶节点视角开始，自动交替翻转符号
-                    self._backup(path, value, root)
-
-            sims_done += len(leaves)
-
-        # 从访问次数计算概率分布
-        policy = np.zeros(POLICY_SIZE, dtype=np.float32)
-        total_visits = sum(c.visit_count for c in root.children.values())
-
-        if total_visits == 0:
-            for idx in root.children:
-                policy[idx] = 1.0 / len(root.children)
-            return policy
-
-        if temperature == 0.0:
-            best_idx = max(root.children.keys(),
-                           key=lambda k: root.children[k].visit_count)
-            policy[best_idx] = 1.0
-        else:
-            for idx, child in root.children.items():
-                policy[idx] = child.visit_count ** (1.0 / temperature)
-            s = policy.sum()
-            if s > 0:
-                policy /= s
-            else:
-                for idx in root.children:
-                    policy[idx] = 1.0 / len(root.children)
-
-        return policy
-
-    def select_move(self, root_state: GameState,
-                    temperature: float = 1.0,
-                    add_exploration_noise: bool = True) -> tuple:
-        """搜索并采样一步走法。返回 (Move, policy)"""
-        probs = self.search(root_state, temperature, add_exploration_noise)
-        legal_moves = root_state.legal_moves()
-        if not legal_moves:
-            return None, probs
-
-        legal_actions = ActionEncoder.legal_actions(legal_moves)
-
-        if temperature == 0.0:
-            idx = int(np.argmax(probs))
-        else:
-            probs_legal = probs[legal_actions].copy()
-            s = probs_legal.sum()
-            if s > 0:
-                probs_legal /= s
-            else:
-                probs_legal = np.ones(len(legal_actions)) / len(legal_actions)
-            idx = int(legal_actions[np.random.choice(len(legal_actions), p=probs_legal)])
-
-        move = ActionEncoder.decode(idx)
-        return move, probs
-
-    # ── 选择 ──
-
-    def _select_leaf(self, root: MCTSNode, root_state: GameState,
-                     pending_nodes=None):
-        """选择一个叶节点。施加虚拟损失防止同batch重复选择。"""
-        node = root
-        state = root_state.copy()
-        path = []
-
-        while node.is_expanded() and not state.is_terminal():
-            idx = node.select_child(self.c_puct)
-            if idx < 0 or idx not in node.children:
-                break
-            path.append((node, idx))
-            node = node.children[idx]
-            # Q is from the child's perspective. Raising it lowers -Q at
-            # the parent, so the reserved branch becomes less attractive.
-            node.visit_count += self.virtual_loss
-            node.total_value += self.virtual_loss
-            move = ActionEncoder.decode(idx)
-            if move is None:
-                break
-            state = state.apply(move)
-
-        if state.is_terminal():
-            r = state.game_result()
-            if r is None:
-                value = 0.0
-            else:
-                value = r.to_value(state.turn)
-            path.append((node, -1))          # 叶节点加入path
-            return (node, state, path, True, value)
-
-        if pending_nodes is not None and id(node) in pending_nodes:
-            for reserved_node, _ in path[1:]:
-                reserved_node.visit_count -= self.virtual_loss
-                reserved_node.total_value -= self.virtual_loss
-            return None
-
-        path.append((node, -1))              # 叶节点加入path
-        return (node, state, path, False, 0.0)
+                    state = state.apply_action(action)
+                    if self.cache_states:
+                        node.rule_state = state
+            path.append((node, -1))
+            if pending_nodes is not None and id(node) in pending_nodes:
+                self._release(path)  # Includes the current leaf.
+                return None
+            result = state.game_result()
+            return node, state, path, result is not None, (
+                result.to_value(state.current_player) if result is not None else 0.0)
+        except BaseException:
+            if not path or path[-1][0] is not node:
+                path.append((node, -1))
+            self._release(path)
+            raise
 
     def _backup(self, path, value, root):
-        """沿路径回传值。撤销虚拟损失，计入真实统计。
+        self._release(path)
+        for node, _ in reversed(path):
+            node.visit_count += 1
+            node.total_value += value
+            value = -value
 
-        path = [(root, a0), (child1, a1), ..., (leaf, -1)]
-        value 为叶节点视角估值。从叶节点开始，每向上一层翻转符号。
-        除 root 外所有节点均施加过虚拟损失，需要撤销。
-        """
-        n = len(path)
-        vl = self.virtual_loss
-        for i, (node, _) in enumerate(reversed(path)):
-            at_root = (i == n - 1)  # root 是 reversed 的最后一个元素
+    @staticmethod
+    def _attach(node, state, policy):
+        actions = state.legal_actions()
+        probabilities = np.asarray(policy, dtype=np.float64)[actions]
+        if not np.isfinite(probabilities).all() or np.any(probabilities < 0):
+            raise FloatingPointError("invalid neural priors")
+        total = probabilities.sum()
+        # Uniform fallback supports non-neural baseline evaluators with zero output.
+        probabilities = probabilities / total if total > 0 else np.full(len(actions), 1 / len(actions))
+        node.children = {int(a): MCTSNode(float(p)) for a, p in zip(actions, probabilities)}
+        # Expanded nodes do not need their NN input again. Keep rule/legality
+        # caches, but avoid retaining 47KB of planes for every visited state.
+        state._encoding = None
 
-            if at_root:
-                # root 没有虚拟损失，直接计入真实统计
-                node.visit_count += 1
-                node.total_value += value
-            else:
-                # 撤销虚拟损失 + 计入真实值
-                node.visit_count += 1 - vl
-                node.total_value += value - vl
-
-            value = -value           # 翻转为上一层视角
-
-    # ── 扩展 ──
-
-    def _expand(self, node: MCTSNode, state: GameState) -> float:
-        """扩展节点的所有合法子节点。"""
-        legal_moves = state.legal_moves()
-        if not legal_moves:
-            return 0.0
-
+    def _expand(self, node, state):
         policy, value = self.evaluator.evaluate(state)
-        legal_actions = ActionEncoder.legal_actions(legal_moves)
-        uniform_prior = 1.0 / len(legal_actions)
+        if not np.isfinite(value) or abs(value) > 1.00001:
+            raise FloatingPointError("invalid neural value")
+        self._attach(node, state, policy)
+        return float(value)
 
-        for idx in legal_actions:
-            node.children[int(idx)] = MCTSNode(
-                prior=float(max(policy[idx], uniform_prior * 0.1)))
-        return value
+    def search(self, root_state, temperature=1.0, add_exploration_noise=True):
+        if temperature < 0:
+            raise ValueError("temperature cannot be negative")
+        output = np.zeros(POLICY_SIZE, dtype=np.float32)
+        self.last_root = None
+        if root_state.is_terminal():
+            return output
+        reusable = (self.reuse_tree and self._reuse_root is not None and self._reuse_state is not None
+                    and self._reuse_state.position_history == root_state.position_history
+                    and self._reuse_state._max_ply == root_state._max_ply
+                    and self._reuse_state.history == root_state.history
+                    and self._reuse_state.repetition_counts == root_state.repetition_counts
+                    and self._reuse_state.no_capture_count == root_state.no_capture_count)
+        root = self._reuse_root if reusable else MCTSNode(1.0)
+        self._reuse_root = self._reuse_state = None
+        self.last_root = root
+        # Remove the incoming leaf evaluation when turning a child into a root.
+        root.visit_count = sum(c.visit_count for c in root.children.values())
+        root.total_value = sum(-c.total_value for c in root.children.values())
+        initial_visits = root.visit_count
+        if not root.is_expanded():
+            self._expand(root, root_state)
+        if add_exploration_noise:
+            noise = self.rng.dirichlet(np.full(len(root.children), self.dirichlet_alpha))
+            for child, epsilon in zip(root.children.values(), noise):
+                child.prior = ((1 - self.dirichlet_epsilon) * child.prior
+                               + self.dirichlet_epsilon * float(epsilon))
+        completed, evaluated, collisions = 0, 0, 0
+        while completed < self.num_simulations:
+            outstanding = []
+            pending = set()
+            try:
+                for _ in range(min(self.batch_size, self.num_simulations - completed)):
+                    leaf = self._select_leaf(root, root_state, pending)
+                    if leaf is None:
+                        collisions += 1
+                        break
+                    outstanding.append(leaf)
+                    if not leaf[3]:
+                        pending.add(id(leaf[0]))
+                if not outstanding:
+                    raise RuntimeError("search made no progress")
+                nonterminal = [leaf for leaf in outstanding if not leaf[3]]
+                if nonterminal:
+                    policies, values = self.evaluator.evaluate_batch([leaf[1] for leaf in nonterminal])
+                    if (len(policies) != len(nonterminal) or len(values) != len(nonterminal)
+                            or not np.isfinite(values).all() or np.any(np.abs(values) > 1.00001)):
+                        raise FloatingPointError("invalid batch neural values")
+                    neural = {id(leaf[0]): (p, float(v))
+                              for leaf, p, v in zip(nonterminal, policies, values)}
+                    evaluated += len(nonterminal)
+                for leaf in list(outstanding):
+                    node, state, path, terminal, value = leaf
+                    if not terminal:
+                        policy, value = neural[id(node)]
+                        self._attach(node, state, policy)
+                    self._backup(path, value, root)
+                    outstanding.pop(0)
+                    completed += 1
+            finally:
+                for leaf in outstanding:
+                    self._release(leaf[2])
+        count = sum(child.visit_count for child in root.children.values())
+        if root.visit_count != initial_visits + self.num_simulations or count != root.visit_count:
+            raise AssertionError("MCTS visit conservation violated")
+        actions = np.array(list(root.children), dtype=np.int64)
+        visits = np.array([child.visit_count for child in root.children.values()], dtype=np.float64)
+        if temperature == 0:
+            output[max(root.children, key=lambda a: (root.children[a].visit_count, a))] = 1
+        else:
+            positive = visits > 0
+            log_weights = np.log(visits[positive]) / temperature
+            weights = np.exp(log_weights - log_weights.max())
+            output[actions[positive]] = weights / weights.sum()
+        self.diagnostics = dict(simulations=completed, evaluated_leaves=evaluated,
+                                pending_collisions=collisions, root_visits=root.visit_count,
+                                reused_visits=initial_visits)
+        return output
 
+    def select_move(self, root_state, temperature=1.0, add_exploration_noise=True):
+        if temperature < 0:
+            raise ValueError("temperature cannot be negative")
+        # Training target always uses raw normalized root visits.
+        pi = self.search(root_state, temperature=1.0,
+                         add_exploration_noise=add_exploration_noise)
+        if not pi.any():
+            return None, pi
+        if temperature == 0:
+            action = max(self.last_root.children, key=lambda a: (self.last_root.children[a].visit_count, a))
+        else:
+            actions = np.flatnonzero(pi)
+            logs = np.log(pi[actions].astype(np.float64)) / temperature
+            probabilities = np.exp(logs - logs.max())
+            probabilities /= probabilities.sum()
+            action = int(self.rng.choice(actions, p=probabilities))
+        move = ActionEncoder.decode(action)
+        if self.reuse_tree:
+            self._reuse_root = self.last_root.children[action]
+            self._reuse_state = root_state.apply(move)
+        return move, pi

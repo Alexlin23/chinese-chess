@@ -1,0 +1,10 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AlphaZero · 与模型对弈</title><link rel="stylesheet" href="/training.css">
+<style>main{max-width:900px}.play-layout{display:grid;grid-template-columns:minmax(280px,440px) 1fr;gap:28px;align-items:start}.game canvas{cursor:pointer;touch-action:manipulation}button{background:#a6e8bd;border:0;border-radius:8px;color:#163325;padding:12px 20px;cursor:pointer;font:inherit}button:disabled{opacity:.5}aside p{color:#93a6a2;line-height:1.8;font-size:14px}.status{font-size:20px;margin-bottom:20px}select{margin:0 0 20px;width:100%}@media(max-width:650px){.play-layout{grid-template-columns:1fr}}</style></head>
+<body><header><div><div class="eyebrow">ALPHAZERO / XIANGQI</div><h1>与模型对弈</h1><p id="model">正在读取模型…</p></div><a href="http://localhost:8765" style="color:#a6e8bd" target="_blank" rel="noopener">训练实况 ↗</a></header>
+<main><div class="play-layout"><article class="game"><div class="game-head"><span>中国象棋</span><span id="ply">第 0 手</span></div><canvas id="board" aria-label="中国象棋棋盘：点击棋子，再点击目标位置"></canvas></article>
+<aside><div id="status" class="status" role="status">正在连接…</div><p>点击你的棋子，再点击目标位置。圆点标出合法落点。</p>
+<label for="human">你的执棋方</label><select id="human"><option value="1">红方 · 先手</option><option value="-1">黑方 · 后手</option></select><button id="restart">开始新对局</button>
+<p>每局使用同一个训练快照。训练发布新模型后，开始新对局即可载入。搜索次数仅影响对弈用时。</p><p>当前使用国规开发版，完整长捉裁定仍待完成。</p><p id="error" role="alert" style="color:#f4b6a2"></p></aside></div></main>
+<script src="/play.js" defer></script></body></html>
