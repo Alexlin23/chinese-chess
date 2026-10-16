@@ -11,6 +11,7 @@
   0=空
 """
 import numpy as np
+from .players import player_id
 from typing import Optional
 from .constants import (ROWS, COLS,
                          KING, ADVISOR, ELEPHANT, KNIGHT, ROOK, CANNON, PAWN,
@@ -207,12 +208,7 @@ def is_in_check(board: np.ndarray, color) -> bool:
     Returns:
         bool: True 如果被将军或将/帅已被吃
     """
-    if isinstance(color, str):
-        color_bool = (color == "r")
-    elif isinstance(color, bool):
-        color_bool = color
-    else:
-        color_bool = (color > 0)
+    color_bool = player_id(color) == RED
 
     king_val = KING if color_bool else -KING
 
@@ -389,10 +385,7 @@ def get_valid_moves(board: np.ndarray, r: int, c: int, turn) -> list[dict]:
 
     对每个原始走法执行原地模拟 → is_in_check → 撤销。
     """
-    if isinstance(turn, str):
-        turn_bool = (turn == "r")
-    else:
-        turn_bool = bool(turn)
+    turn_bool = player_id(turn) == RED
 
     cell = board[r, c]
     if cell == 0:
@@ -418,6 +411,7 @@ def get_valid_moves(board: np.ndarray, r: int, c: int, turn) -> list[dict]:
 
 def is_valid_move(board: np.ndarray, from_pos, to_pos, turn) -> bool:
     """校验单步走法是否合法（定点校验，不枚举全部走法）。"""
+    turn_bool = player_id(turn) == RED
     if isinstance(from_pos, dict):
         fr, fc = from_pos["row"], from_pos["col"]
     else:
@@ -433,11 +427,6 @@ def is_valid_move(board: np.ndarray, from_pos, to_pos, turn) -> bool:
     cell = board[fr, fc]
     if cell == 0:
         return False
-
-    if isinstance(turn, str):
-        turn_bool = (turn == "r")
-    else:
-        turn_bool = bool(turn)
 
     if (cell > 0) != turn_bool:
         return False
@@ -506,10 +495,7 @@ def check_game_result(board: np.ndarray, turn) -> str:
     Returns:
         "red_win" / "black_win" / "draw" / "ongoing"
     """
-    if isinstance(turn, str):
-        turn_bool = (turn == "r")
-    else:
-        turn_bool = bool(turn)
+    turn_bool = player_id(turn) == RED
 
     has_red_king = np.any(board == KING)
     has_black_king = np.any(board == -KING)
@@ -531,10 +517,7 @@ def has_any_valid_move(board: np.ndarray, color) -> bool:
 
     使用 numpy 向量化定位所有己方棋子，早停。
     """
-    if isinstance(color, str):
-        color_bool = (color == "r")
-    else:
-        color_bool = bool(color)
+    color_bool = player_id(color) == RED
 
     sign = 1 if color_bool else -1
     # numpy 向量化：找到所有己方棋子

@@ -1,0 +1,51 @@
+{
+  "date": "2026-10-16",
+  "source_checkpoint_step": 81300,
+  "final_checkpoint_step": 82000,
+  "final_actor_step": 82000,
+  "updates": 700,
+  "final_loss": 1.7322959899902344,
+  "median_seconds_per_update": 0.6308932179963449,
+  "finite_losses": true,
+  "initial_model_weights_equal_source": true,
+  "final_actor_weights_equal_learner": true,
+  "rule": "xiangqi-development-v3-natural-limit",
+  "fingerprint": "e793151f623789e9a47d950f64b779d2ddc63ea611cae24769cc885e53d9fcba",
+  "run_id": "12547b1e-9441-455f-bdb1-286e3cb2627a",
+  "source_checkpoint_sha256": "054a5bc5976665a469a0ebf44c59d4de88258c0345b0dc194a4e7792f5d4b022",
+  "replay_games": 145,
+  "replay_positions": 18517,
+  "completed_new_games_during_validation": 0,
+  "historical_policy_rule": "xiangqi-development-v2",
+  "configuration": {
+    "device": "cuda",
+    "precision": "bf16",
+    "blocks": 19,
+    "batch_size": 4096,
+    "actor_processes": 8,
+    "parallel_boards": 32,
+    "simulations": 800,
+    "filters": 128
+  },
+  "live_observation": {
+    "learner_step": 81890,
+    "minimum_ply": 15,
+    "boards": 32,
+    "maximum_ply": 15,
+    "errors": [],
+    "observed_simulations_per_search": 800
+  },
+  "tests": {
+    "warning": "Starlette httpx TestClient deprecation",
+    "passed": 105,
+    "seconds": 34.49,
+    "skipped": 1
+  },
+  "source_run": "D:/project/Alphazero/AlphaZero/runs/xiangqi-v3-20261015",
+  "target_run": "D:/project/Alphazero/AlphaZero/runs/xiangqi-rules-20261016",
+  "limitations": [
+    "Historical policy visit counts were not regenerated under new rules",
+    "Full CNXA adjudication and complete rule observation planes remain incomplete",
+    "Training/runtime validation does not establish playing strength"
+  ]
+}

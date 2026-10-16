@@ -91,6 +91,7 @@ class PlaySession:
                         thinking=self.thinking, error=self.error, last_move=self.last_move,
                         legal_moves=legal, token=self.token, model_step=self.player.step,
                         simulations=self.player.simulations,
+                        natural_limit=self.state.natural_limit_status(),
                         result=None if result is None else dict(winner=result.winner, reason=result.reason))
 
     def close(self):

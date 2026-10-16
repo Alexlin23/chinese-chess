@@ -5,12 +5,13 @@ import hashlib
 import json
 import math
 import yaml
+from ..engine.constants import NATURAL_LIMIT_ROUNDS, NATURAL_LIMIT_CHECK_CAP
 
 SCHEMA_VERSION = 3
 ALGORITHM_VERSION = "alphazero-datas1-aligned-v3"
 OBSERVATION_VERSION = "xiangqi-history8-131-v2"
 ACTION_VERSION = "absolute-from-to-8100-v1"
-RULE_VERSION = "xiangqi-development-v2"  # Target: CNXA 2020; full adjudication is not certified.
+RULE_VERSION = "xiangqi-development-v3-natural-limit"  # CNXA 2020 check cap; chase remains incomplete.
 TARGET_VERSION = "scalar-mse-visits-v1"
 
 @dataclass
@@ -116,7 +117,10 @@ class AlphaZeroConfig:
                     action=ACTION_VERSION, rule=RULE_VERSION, target=TARGET_VERSION,
                     blocks=self.num_blocks, filters=self.num_filters,
                     channels=self.input_channels, max_game_ply=self.max_game_ply,
-                    no_capture_plies=120, repetition_limit=3)
+                    no_capture_plies=2 * NATURAL_LIMIT_ROUNDS,
+                    natural_limit_rounds=NATURAL_LIMIT_ROUNDS,
+                    natural_limit_check_cap=NATURAL_LIMIT_CHECK_CAP,
+                    natural_limit_claim="side-to-move-auto", repetition_limit=3)
 
     @property
     def fingerprint(self):

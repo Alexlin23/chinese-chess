@@ -19,6 +19,8 @@ let turn = "r";               // "r" 红方, "b" 黑方
 let gameOver = false;
 let history = [];
 let gameSessionId = null;
+let ruleRevision = 0;
+let movePending = false;
 let capturedRed = [];         // 被吃的红方棋子
 let capturedBlack = [];       // 被吃的黑方棋子
 let syncedStepCount = 0;      // 已同步的步数，用于轮询检测外部变更
@@ -73,6 +75,8 @@ function initBoard() {
 }
 
 function initGame() {
+  gameSessionId = null;
+  ruleRevision = 0;
   selected = null;
   validMoves = [];
   turn = "r";
@@ -104,6 +108,7 @@ function initGame() {
         }
         // 恢复对局
         gameSessionId = data.game_id;
+        ruleRevision = data.revision;
         board = data.board;
         turn = data.turn;
         // 恢复历史
@@ -147,6 +152,7 @@ function initGame() {
       .then(r => r.json())
       .then(data => {
         gameSessionId = data.game_id;
+        ruleRevision = data.revision;
         localStorage.setItem("chess_game_id", gameSessionId);
         board = data.board;
         drawBoard();
@@ -355,10 +361,10 @@ async function fetchValidMoves(row, col) {
     const resp = await fetch("/api/valid-moves", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ board, row, col, turn }),
+      body: JSON.stringify({ board, row, col, turn, game_id: gameSessionId, revision: ruleRevision }),
     });
     const data = await resp.json();
-    validMoves = data.moves || [];
+    if (data.game_id === gameSessionId && data.revision === ruleRevision) validMoves = data.moves || [];
   } catch (err) {
     console.error("后端获取走法失败", err);
     validMoves = [];
@@ -371,7 +377,9 @@ async function fetchValidMoves(row, col) {
 //  走棋
 // ============================================================
 async function doMove(fromR, fromC, toR, toC) {
-  if (gameOver) return;
+  if (gameOver || movePending || !gameSessionId) return;
+  const requestGame = gameSessionId;
+  movePending = true;
 
   try {
     const resp = await fetch("/api/move", {
@@ -383,9 +391,11 @@ async function doMove(fromR, fromC, toR, toC) {
         to_pos: { row: toR, col: toC },
         turn,
         game_id: gameSessionId,
+        revision: ruleRevision,
       }),
     });
     const data = await resp.json();
+    if (requestGame !== gameSessionId) return;
     if (!data.valid) {
       msgEl.textContent = "走法不合法";
       return;
@@ -411,7 +421,8 @@ async function doMove(fromR, fromC, toR, toC) {
     }
     // 用后端返回的新棋盘
     board = data.new_board;
-    turn = turn === "r" ? "b" : "r";
+    turn = data.turn;
+    ruleRevision = data.revision;
     selected = null;
     validMoves = [];
     syncedStepCount = history.length;
@@ -420,11 +431,13 @@ async function doMove(fromR, fromC, toR, toC) {
     renderPieces();
     if (data.game_over) {
       gameOver = true;
-      msgEl.textContent = data.game_over === "red_win" ? "红方胜！" : "黑方胜！";
+      msgEl.textContent = data.game_over === "draw" ? "和棋" : (data.game_over === "red_win" ? "红方胜！" : "黑方胜！");
     }
   } catch (err) {
     console.error("后端走棋失败", err);
     msgEl.textContent = "走棋失败，请检查后端连接";
+  } finally {
+    movePending = false;
   }
 }
 
@@ -432,15 +445,20 @@ async function doMove(fromR, fromC, toR, toC) {
 //  悔棋
 // ============================================================
 document.getElementById("btn-undo").addEventListener("click", async () => {
-  if (history.length === 0) return;
+  if (history.length === 0 || movePending) return;
+  movePending = true;
 
   try {
-    const resp = await fetch(`/api/game/${gameSessionId}/undo`, { method: "POST" });
+    const resp = await fetch(`/api/game/${gameSessionId}/undo`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ revision: ruleRevision }),
+    });
     if (!resp.ok) throw new Error("undo failed");
     const data = await resp.json();
     // 用后端返回的准确状态覆盖本地
     board = data.board;
     turn = data.turn;
+    ruleRevision = data.revision;
     syncedStepCount = data.step_count;
     // 同步历史
     const histResp = await fetch(`/api/game/${gameSessionId}/history`);
@@ -463,6 +481,8 @@ document.getElementById("btn-undo").addEventListener("click", async () => {
     console.error("后端悔棋失败", err);
     msgEl.textContent = "悔棋失败，请检查后端连接";
     return;
+  } finally {
+    movePending = false;
   }
 
   selected = null;
@@ -501,6 +521,8 @@ document.getElementById("btn-heuristic").addEventListener("click", async () => {
       body: JSON.stringify({
         board,
         turn,
+        game_id: gameSessionId,
+        revision: ruleRevision,
         from_pos: { row: 0, col: 0 },
         to_pos: { row: 0, col: 0 },
       }),
@@ -514,6 +536,7 @@ document.getElementById("btn-heuristic").addEventListener("click", async () => {
 
     const data = await resp.json();
     console.log("Heuristic move:", data.from_pos, "->", data.to_pos);
+    if (data.game_id !== gameSessionId || data.revision !== ruleRevision) return;
     await doMove(data.from_pos.row, data.from_pos.col,
                  data.to_pos.row, data.to_pos.col);
   } catch (err) {
@@ -552,6 +575,8 @@ document.getElementById("btn-ai").addEventListener("click", async () => {
       body: JSON.stringify({
         board,
         turn,
+        game_id: gameSessionId,
+        revision: ruleRevision,
         from_pos: { row: 0, col: 0 },
         to_pos: { row: 0, col: 0 },
       }),
@@ -565,6 +590,7 @@ document.getElementById("btn-ai").addEventListener("click", async () => {
 
     const data = await resp.json();
     console.log("AI move:", data.from_pos, "->", data.to_pos);
+    if (data.game_id !== gameSessionId || data.revision !== ruleRevision) return;
     await doMove(data.from_pos.row, data.from_pos.col,
                  data.to_pos.row, data.to_pos.col);
   } catch (err) {
@@ -587,22 +613,26 @@ document.addEventListener("keydown", (e) => {
 
 // ============================================================
 //  轮询：检测外部走棋（如 test_api.py 直接调 API）
-//  单次请求 /api/game/{id}，通过 step_count 检测变化
+//  通过单调递增的 revision 检测走棋和悔棋
 // ============================================================
 function startPolling() {
   if (pollingTimer) clearInterval(pollingTimer);
   pollingTimer = setInterval(async () => {
-    if (!gameSessionId || gameOver) return;
+    if (!gameSessionId || movePending) return;
     try {
       const resp = await fetch(`/api/game/${gameSessionId}`);
       const data = await resp.json();
-      if (data.step_count !== syncedStepCount) {
+      if (movePending || data.game_id !== gameSessionId || data.revision <= ruleRevision) return;
+      if (data.revision !== ruleRevision) {
+        // 重新加载历史（用于悔棋和被吃棋子展示）
+        const histResp = await fetch(`/api/game/${data.game_id}/history`);
+        const histData = await histResp.json();
+        if (movePending || data.game_id !== gameSessionId || data.revision <= ruleRevision ||
+            histData.revision !== data.revision) return;
         syncedStepCount = data.step_count;
+        ruleRevision = data.revision;
         board = data.board;
         turn = data.turn;
-        // 重新加载历史（用于悔棋和被吃棋子展示）
-        const histResp = await fetch(`/api/game/${gameSessionId}/history`);
-        const histData = await histResp.json();
         history = histData.moves.map(m => ({
           from: { row: m.from_row, col: m.from_col },
           to: { row: m.to_row, col: m.to_col },
@@ -624,9 +654,9 @@ function startPolling() {
         drawBoard();
         renderPieces();
         renderCaptured();
-        if (data.status !== "ongoing") {
-          gameOver = true;
-          msgEl.textContent = data.status === "red_win" ? "红方胜！" : "黑方胜！";
+        gameOver = data.status !== "ongoing";
+        if (gameOver) {
+          msgEl.textContent = data.status === "draw" ? "和棋" : (data.status === "red_win" ? "红方胜！" : "黑方胜！");
         }
       }
     } catch (e) { /* 忽略轮询错误 */ }
@@ -667,7 +697,8 @@ document.getElementById("btn-ai-vs-ai").addEventListener("click", async () => {
       const resp = await fetch("/api/ai-move", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ board, turn, from_pos: { row: 0, col: 0 }, to_pos: { row: 0, col: 0 } }),
+        body: JSON.stringify({ board, turn, game_id: gameSessionId, revision: ruleRevision,
+          from_pos: { row: 0, col: 0 }, to_pos: { row: 0, col: 0 } }),
       });
       if (!resp.ok) {
         msgEl.textContent = "AI 走棋失败";
@@ -675,6 +706,7 @@ document.getElementById("btn-ai-vs-ai").addEventListener("click", async () => {
         return;
       }
       const data = await resp.json();
+      if (data.game_id !== gameSessionId || data.revision !== ruleRevision) { stopAiVsAi(); return; }
       await doMove(data.from_pos.row, data.from_pos.col, data.to_pos.row, data.to_pos.col);
       if (!gameOver && aiVsAiRunning) {
         aiVsAiTimer = setTimeout(aiStep, 300);

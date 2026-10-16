@@ -1,344 +1,204 @@
-"""中国象棋后端 API - FastAPI 入口"""
+"""Web API using the same history-aware GameState as self-play and MCTS."""
 import os
 import sys
-# 确保能导入同目录模块
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
+from pathlib import Path
+import threading
 from contextlib import asynccontextmanager
+import numpy as np
 
-from models import (
-    ValidMovesRequest, MoveRequest, MoveResponse,
-    GameCreateResponse, GameInfoResponse, PieceInfo, Position,
-    CheckWinRequest,
-)
-from chess_rules import (
-    create_initial_board, get_valid_moves, is_valid_move,
-    make_move, check_game_result, is_in_check,
-)
-from database import init_db, create_game, get_game, update_game, add_move, get_moves, record_step, get_step_count, undo_game
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    __package__ = "backend"
 
-# AlphaZero AI（只读导入）
-import sys as _sys
-from pathlib import Path as _Path
-_sys.path.insert(0, str(_Path(__file__).parent.parent))
-from AlphaZero.engine import GameState as _AlphaGameState
-from AlphaZero.engine.heuristic import heuristic_move as _heuristic_move
-from AlphaZero.search import MCTS as _AlphaMCTS
-from AlphaZero.model import PolicyWDLEncoder as _PolicyWDLNet, NeuralEvaluator as _NeuralEval
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
+from .models import (ValidMovesRequest, MoveRequest, MoveResponse, GameCreateResponse,
+                     GameInfoResponse, PieceInfo, CheckWinRequest, UndoRequest)
+from . import database as db
+from .rule_adapter import numeric_board, web_board, status
+from AlphaZero.engine import Move, player_id
+from AlphaZero.engine.heuristic import heuristic_move
+from AlphaZero.train.config import RULE_VERSION
 
-# 神经网络评估器（懒加载）
-_neural_model = None
-_neural_evaluator = None
 _neural_mcts = None
+_neural_lock = threading.Lock()
 
 
 def _get_neural_mcts():
-    """懒加载：创建/获取神经网络 MCTS 实例"""
-    global _neural_model, _neural_evaluator, _neural_mcts
+    global _neural_mcts
     if _neural_mcts is None:
-        ckpt_dir = _Path(__file__).parent.parent / "AlphaZero" / "checkpoints"
-        best = ckpt_dir / "best.pt"
-        latest = ckpt_dir / "latest.pt"
-        model_path = best if best.exists() else latest
-        if model_path.exists():
-            print(f"加载模型: {model_path}")
-            state = __import__('torch').load(str(model_path),
-                                             map_location='cpu', weights_only=False)
-            cfg = state.get('config', {})
-            _neural_model = _PolicyWDLNet(
-                num_blocks=cfg.get('num_blocks', 8),
-                num_filters=cfg.get('num_filters', 128))
-            _neural_model.load_state_dict(state['model_state_dict'])
-            _neural_evaluator = _NeuralEval(_neural_model)
-            _neural_mcts = _AlphaMCTS(
-                _neural_evaluator,
-                num_simulations=cfg.get('num_simulations', 800),
-                c_puct=cfg.get('c_puct', 1.5),
-            )
-        else:
-            print("没有找到 checkpoint，请先训练模型")
+        from AlphaZero.model.player import ModelPlayer
+        root = Path(__file__).resolve().parents[1]
+        best, latest = root / "AlphaZero/checkpoints/best.pt", root / "AlphaZero/checkpoints/latest.pt"
+        path = Path(os.environ["XIANGQI_MODEL"]) if os.environ.get("XIANGQI_MODEL") else (best if best.exists() else latest)
+        if not path.exists():
             return None
+        # ModelPlayer rejects incompatible/step-zero checkpoints before searching.
+        from AlphaZero.search import MCTS
+        player = ModelPlayer(path, device="cpu")
+        _neural_mcts = MCTS(player.evaluator, num_simulations=player.config.num_simulations,
+                           c_puct=player.config.c_puct, pb_c_base=player.config.pb_c_base)
     return _neural_mcts
 
 
-# ── WebSocket 连接管理 ──
-from fastapi import WebSocket, WebSocketDisconnect
-
-class _ConnectionManager:
-    """管理 WebSocket 连接，按 game_id 分组广播"""
-    def __init__(self):
-        self._connections: dict[int, list[WebSocket]] = {}
-
-    async def connect(self, game_id: int, ws: WebSocket):
-        await ws.accept()
-        self._connections.setdefault(game_id, []).append(ws)
-
-    def disconnect(self, game_id: int, ws: WebSocket):
-        if game_id in self._connections:
-            self._connections[game_id].remove(ws)
-
-    async def broadcast(self, game_id: int, data: dict):
-        """向关注某对局的所有客户端推送消息"""
-        for ws in self._connections.get(game_id, []):
-            try:
-                await ws.send_json(data)
-            except Exception:
-                pass
-
-ws_manager = _ConnectionManager()
-
-
 @asynccontextmanager
-async def lifespan(app: FastAPI):
-    init_db()
+async def lifespan(app):
+    db.init_db()
     yield
 
 
 app = FastAPI(title="中国象棋 API", lifespan=lifespan)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# 托管前端静态文件
-FRONTEND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "frontend")
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+FRONTEND_DIR = str(Path(__file__).resolve().parents[1] / "frontend")
 app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
+
+
+@app.exception_handler(db.StateConflict)
+async def state_conflict(request, exc):
+    return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+
+def _game(game_id):
+    try:
+        return db.get_rule_game(game_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="对局不存在") from exc
+
+
+def _request_state(req):
+    state, revision = _game(req.game_id)
+    try:
+        board = numeric_board(req.board)
+    except (ValueError, KeyError, TypeError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if (req.revision != revision or player_id(req.turn) != state.current_player
+            or not np.array_equal(board, state.board)):
+        raise db.StateConflict("棋局已更新或提交棋盘不一致，请刷新后重试")
+    return state, revision
+
+
+def _metadata(state, revision):
+    result = state.game_result()
+    return dict(revision=revision, no_capture_count=state.no_capture_count,
+                natural_limit=state.natural_limit_status(),
+                rule_reason=result.reason if result else None, rule_version=RULE_VERSION)
 
 
 @app.get("/")
 def serve_index():
-    """返回前端页面"""
-    from fastapi.responses import FileResponse
     return FileResponse(os.path.join(FRONTEND_DIR, "index.html"))
 
 
 @app.post("/api/valid-moves")
 def api_valid_moves(req: ValidMovesRequest):
-    """获取某棋子的所有合法走法"""
-    board = _parse_board(req.board)
-    moves = get_valid_moves(board, req.row, req.col, req.turn)
-    return {"moves": moves}
+    state, revision = _request_state(req)
+    moves = [] if state.is_terminal() else [
+        dict(row=m.to_row, col=m.to_col, capture=bool(state.board[m.to_row, m.to_col]))
+        for m in state.legal_moves() if (m.from_row, m.from_col) == (req.row, req.col)]
+    return dict(game_id=req.game_id, moves=moves, **_metadata(state, revision))
 
 
 @app.post("/api/move", response_model=MoveResponse)
 def api_move(req: MoveRequest):
-    """执行走棋。如果传入 game_id 则同步写入数据库。"""
-    board = _parse_board(req.board)
-    from_pos = {"row": req.from_pos.row, "col": req.from_pos.col}
-    to_pos = {"row": req.to_pos.row, "col": req.to_pos.col}
-
-    piece = board[req.from_pos.row][req.from_pos.col]
-    if not is_valid_move(board, from_pos, to_pos, req.turn):
+    _request_state(req)
+    result = db.commit_move(req.game_id,
+        Move(req.from_pos.row, req.from_pos.col, req.to_pos.row, req.to_pos.col), req.revision)
+    if result is None:
         return MoveResponse(valid=False)
-
-    new_board, captured = make_move(board, from_pos, to_pos)
-    next_turn = "b" if req.turn == "r" else "r"
-    result = check_game_result(new_board, next_turn)
-    in_check = is_in_check(new_board, next_turn)
-
-    game_over = None
-    game_status = "ongoing"
-    if result in ("red_win", "black_win", "draw"):
-        game_over = result
-        game_status = result
-
-    # 如果关联了对局，同步写入数据库
-    if req.game_id is not None:
-        step = get_step_count(req.game_id) + 1
-        record_step(
-            game_id=req.game_id,
-            step=step,
-            board=new_board,
-            turn=next_turn,
-            from_pos=from_pos,
-            to_pos=to_pos,
-            piece=piece,
-            captured=captured,
-            status=game_status,
-        )
-
-    return MoveResponse(
-        valid=True,
-        captured=PieceInfo(**captured) if captured else None,
-        check=in_check,
-        game_over=game_over,
-        new_board=_serialize_board(new_board),
-    )
+    state, revision, captured = result
+    outcome = status(state)
+    return MoveResponse(valid=True, captured=PieceInfo(**captured) if captured else None,
+        check=state.is_in_check(), game_over=outcome if outcome != "ongoing" else None,
+        new_board=web_board(state), turn="r" if state.turn else "b", **_metadata(state, revision))
 
 
 @app.post("/api/check-win")
 def api_check_win(req: CheckWinRequest):
-    """检测胜负"""
-    board = _parse_board(req.board)
-    result = check_game_result(board, req.turn)
-    return {"result": result}
+    state, revision = _request_state(req)
+    return dict(result=status(state), **_metadata(state, revision))
 
 
 @app.post("/api/game/new", response_model=GameCreateResponse)
 def api_new_game():
-    """创建新对局"""
-    board = create_initial_board()
-    game_id = create_game(board)
-    return GameCreateResponse(
-        game_id=game_id,
-        board=_serialize_board(board),
-        turn="r",
-    )
+    game_id = db.create_game()
+    state, revision = _game(game_id)
+    return GameCreateResponse(game_id=game_id, board=web_board(state), turn="r",
+                              **_metadata(state, revision))
 
 
 @app.get("/api/game/{game_id}", response_model=GameInfoResponse)
 def api_get_game(game_id: int):
-    """获取对局信息"""
-    game = get_game(game_id)
-    if not game:
-        raise HTTPException(status_code=404, detail="对局不存在")
-    return GameInfoResponse(
-        game_id=game["id"],
-        board=game["board"],
-        turn=game["turn"],
-        status=game["status"],
-        step_count=get_step_count(game_id),
-    )
+    state, revision = _game(game_id)
+    return GameInfoResponse(game_id=game_id, board=web_board(state), turn="r" if state.turn else "b",
+        status=status(state), step_count=state.move_count, **_metadata(state, revision))
 
 
 @app.get("/api/game/{game_id}/history")
 def api_game_history(game_id: int):
-    """获取走棋历史"""
-    game = get_game(game_id)
-    if not game:
-        raise HTTPException(status_code=404, detail="对局不存在")
-    moves = get_moves(game_id)
-    return {"game_id": game_id, "moves": moves}
+    # Return history and revision from one read transaction.
+    _game(game_id)
+    with db.transaction() as conn:
+        _, row, moves = db._load(conn, game_id)
+        return dict(game_id=game_id, revision=row["revision"], moves=[dict(m) for m in moves])
 
 
 @app.post("/api/game/{game_id}/undo")
-def api_undo(game_id: int):
-    """悔棋：删除最后一步，回滚棋盘"""
-    result = undo_game(game_id, create_initial_board)
-    if not result:
-        raise HTTPException(status_code=400, detail="无法悔棋（对局不存在或无走棋记录）")
+def api_undo(game_id: int, req: UndoRequest):
+    _game(game_id)
+    result = db.undo_game(game_id, req.revision)
+    if result is None:
+        raise HTTPException(status_code=400, detail="没有可撤销的走棋")
+    result["rule_version"] = RULE_VERSION
     return result
+
+
+def _require_playable(state):
+    if state.is_terminal():
+        raise HTTPException(status_code=400, detail="对局已经结束")
 
 
 @app.post("/api/ai-move")
 def api_ai_move(req: MoveRequest):
-    """AI走棋：使用 MCTS 搜索选择最优走法。
-
-    请求体格式与 /api/move 一致（board + turn），
-    但只需 from_pos/to_pos 中的棋盘和轮次信息。
-
-    返回: {from_pos, to_pos} 可直接传递给 /api/move 走棋。
-    """
-    board = _parse_board(req.board)
-    state = _board_to_gamestate(board, req.turn)
-
-    neural_mcts = _get_neural_mcts()
-    if neural_mcts is None:
-        raise HTTPException(status_code=503, detail="模型未加载，请先训练")
-
-    move, _ = neural_mcts.select_move(state, temperature=0.0)
-    if move is None:
+    state, revision = _request_state(req)
+    _require_playable(state)
+    with _neural_lock:
+        search = _get_neural_mcts()
+        if search is None:
+            raise HTTPException(status_code=503, detail="模型未加载，请先配置训练后的模型")
+        move, _ = search.select_move(state, temperature=0.0, add_exploration_noise=False)
+    # A concurrent move or undo invalidates an AI response too.
+    if _game(req.game_id)[1] != revision:
+        raise db.StateConflict("AI思考期间棋局已更新")
+    if move is None or not state.is_legal(move):
         raise HTTPException(status_code=400, detail="AI找不到合法走法")
-
-    return {
-        "from_pos": {"row": move.from_row, "col": move.from_col},
-        "to_pos": {"row": move.to_row, "col": move.to_col},
-    }
+    return dict(game_id=req.game_id, from_pos=dict(row=move.from_row, col=move.from_col),
+                to_pos=dict(row=move.to_row, col=move.to_col), **_metadata(state, revision))
 
 
 @app.post("/api/heuristic-move")
 def api_heuristic_move(req: MoveRequest):
-    """启发式AI走棋：基于纯子力估值，只算当前最优吃子/保子。
-
-    不依赖神经网络，始终可用，速度极快（<1ms）。
-    请求体格式与 /api/ai-move 一致。
-
-    返回: {from_pos, to_pos} 可直接传递给 /api/move 走棋。
-    """
-    board = _parse_board(req.board)
-    state = _board_to_gamestate(board, req.turn)
-
-    move = _heuristic_move(state)
+    state, revision = _request_state(req)
+    _require_playable(state)
+    move = heuristic_move(state)
+    if _game(req.game_id)[1] != revision:
+        raise db.StateConflict("AI思考期间棋局已更新")
     if move is None:
         raise HTTPException(status_code=400, detail="启发式AI找不到合法走法")
+    return dict(game_id=req.game_id, from_pos=dict(row=move.from_row, col=move.from_col),
+                to_pos=dict(row=move.to_row, col=move.to_col), **_metadata(state, revision))
 
-    return {
-        "from_pos": {"row": move.from_row, "col": move.from_col},
-        "to_pos": {"row": move.to_row, "col": move.to_col},
-    }
-
-
-# ============================================================
-#  WebSocket — 实时观战
-# ============================================================
 
 @app.websocket("/ws/watch/{game_id}")
 async def ws_watch_game(ws: WebSocket, game_id: int):
-    """WebSocket 端点：实时观看对局。
-
-    客户端连接后，服务端在有新走棋时推送 JSON:
-      {"type": "move", "step": N, "from": [r,c], "to": [r,c],
-       "board": [...], "turn": "r"/"b", "check": bool, "game_over": str|None}
-    """
-    await ws_manager.connect(game_id, ws)
+    await ws.accept()
     try:
-        # 保持连接，等待客户端消息（用于心跳/控制）
         while True:
-            data = await ws.receive_text()
-            if data == "ping":
+            if await ws.receive_text() == "ping":
                 await ws.send_text("pong")
     except WebSocketDisconnect:
         pass
-    except Exception:
-        pass
-    finally:
-        ws_manager.disconnect(game_id, ws)
-
-
-# ============================================================
-#  辅助
-# ============================================================
-
-def _parse_board(board_data):
-    """将 Pydantic 模型转为 dict 棋盘"""
-    return [
-        [
-            {"type": cell.type, "color": cell.color} if cell else None
-            for cell in row
-        ]
-        for row in board_data
-    ]
-
-
-def _board_to_gamestate(board, turn):
-    """将 dict 棋盘转为 AlphaZero GameState"""
-    import numpy as np
-    _type_to_num = {
-        "帥": 1, "仕": 2, "相": 3, "馬": 4, "車": 5, "炮": 6, "兵": 7,
-        "將": 1, "士": 2, "象": 3,           "砲": 6, "卒": 7,
-    }
-    arr = np.zeros((10, 9), dtype=np.int8)
-    for r in range(10):
-        for c in range(9):
-            p = board[r][c]
-            if p:
-                sign = 1 if p["color"] == "r" else -1
-                arr[r, c] = sign * _type_to_num[p["type"]]
-    return _AlphaGameState(arr, turn)
-
-
-def _serialize_board(board):
-    """将 dict 棋盘转为可序列化格式"""
-    return [
-        [cell if cell else None for cell in row]
-        for row in board
-    ]
 
 
 if __name__ == "__main__":

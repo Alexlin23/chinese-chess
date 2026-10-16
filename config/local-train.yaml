@@ -31,7 +31,7 @@ replay_cache_mb: 256
 num_workers: 32
 inference_batch_size: 128
 inference_wait_ms: 2.0
-checkpoint_dir: AlphaZero/runs/xiangqi-v3-20261015
+checkpoint_dir: AlphaZero/runs/xiangqi-rules-20261016
 max_iterations: 700
 seed: 20261015
 precision: bf16

@@ -1,6 +1,6 @@
 param(
     [ValidateSet('Status', 'Start', 'Resume', 'Stop')][string]$Action = 'Status',
-    [string]$RunName = 'xiangqi-v3-20261015',
+    [string]$RunName = 'xiangqi-rules-20261016',
     [string]$Config = 'config/local-train.yaml'
 )
 $ErrorActionPreference = 'Stop'

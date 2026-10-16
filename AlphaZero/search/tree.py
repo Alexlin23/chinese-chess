@@ -95,6 +95,8 @@ class MCTS:
                     and self._reuse_state._max_ply == root_state._max_ply
                     and self._reuse_state.history == root_state.history
                     and self._reuse_state.repetition_counts == root_state.repetition_counts
+                    and self._reuse_state.check_history == root_state.check_history
+                    and self._reuse_state.no_capture_checks == root_state.no_capture_checks
                     and self._reuse_state.no_capture_count == root_state.no_capture_count)
         root = self._reuse_root if reusable else MCTSNode(1.0)
         self._reuse_root = self._reuse_state = None

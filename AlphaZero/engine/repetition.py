@@ -1,6 +1,7 @@
 """重复局面检测 — 支持三次重复平局"""
 import numpy as np
 from .constants import ROWS, COLS
+from .players import player_id
 
 
 def position_key(board: np.ndarray, turn: bool) -> bytes:
@@ -13,7 +14,7 @@ def position_key(board: np.ndarray, turn: bool) -> bytes:
     Returns:
         bytes: 可哈希的局面 key
     """
-    turn_byte = b"r" if turn else b"b"
+    turn_byte = b"r" if player_id(turn) == 1 else b"b"
     return board.tobytes() + turn_byte
 
 

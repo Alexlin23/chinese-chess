@@ -17,6 +17,8 @@ WDL_SIZE: int = 3
 # ── 游戏规则 ──
 MAX_GAME_PLY: int = 512
 REPETITION_LIMIT: int = 3
+NATURAL_LIMIT_ROUNDS: int = 60
+NATURAL_LIMIT_CHECK_CAP: int = 10
 
 # ── 棋子编码 (int8) ──
 EMPTY = 0

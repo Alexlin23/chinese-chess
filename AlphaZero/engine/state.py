@@ -11,15 +11,8 @@ from .constants import ROWS, COLS, KING, RED, BLACK, MAX_GAME_PLY, INPUT_CHANNEL
 from .fast_chess import create_initial_board, get_valid_moves, make_move, is_in_check
 from .move import Move, ActionEncoder
 from .repetition import position_key
-
-def player_id(player):
-    if isinstance(player, (bool, np.bool_)):
-        return RED if player else BLACK
-    if player in ("r", RED):
-        return RED
-    if player in ("b", BLACK):
-        return BLACK
-    raise ValueError(f"invalid player: {player!r}")
+from .players import player_id
+from .constants import NATURAL_LIMIT_ROUNDS, NATURAL_LIMIT_CHECK_CAP
 
 @dataclass(frozen=True)
 class GameResult:
@@ -40,7 +33,7 @@ class GameResult:
 class GameState:
     __slots__ = ("board", "turn", "move_count", "no_capture_count", "repetition_counts",
                  "last_move", "_max_ply", "_encoding", "_legal_mask", "_moves",
-                 "history", "position_history", "check_history", "_outcome", "_resolved")
+                 "history", "position_history", "check_history", "no_capture_checks", "_outcome", "_resolved")
 
     def __setattr__(self, name, value):
         if (hasattr(self, "_resolved") and name not in
@@ -50,7 +43,7 @@ class GameState:
 
     def __init__(self, board, turn, move_count=0, no_capture_count=0,
                  repetition_counts=None, last_move=None, max_ply=None, *,
-                 history=None, position_history=None, check_history=()):
+                 history=None, position_history=None, check_history=(), no_capture_checks=None):
         original = np.asarray(board)
         if (original.shape != (ROWS, COLS) or original.dtype.kind not in "iu"
                 or np.any(original < -7) or np.any(original > 7)):
@@ -68,6 +61,17 @@ class GameState:
         self.history = tuple(history) if history is not None else ((data.tobytes(), counts.get(key, 1)),)
         self.position_history = tuple(position_history) if position_history is not None else (key,)
         self.check_history = tuple(check_history)
+        if no_capture_checks is None:
+            if self.no_capture_count > len(self.check_history):
+                raise ValueError("no-capture interval requires its check history or explicit check counts")
+            interval = self.check_history[-self.no_capture_count:] if self.no_capture_count else ()
+            no_capture_checks = tuple(sum(bool(check) for mover, check in interval if mover == side)
+                                      for side in (RED, BLACK))
+        checks = tuple(no_capture_checks)
+        if (len(checks) != 2 or any(type(n) is not int or n < 0 for n in checks)
+                or any(n > self._no_capture_moves(side) for side, n in zip((RED, BLACK), checks))):
+            raise ValueError("invalid no-capture check counts")
+        self.no_capture_checks = checks
         self.last_move = last_move
         self._encoding = self._legal_mask = self._moves = self._outcome = None
         self._resolved = False
@@ -78,6 +82,27 @@ class GameState:
 
     def copy(self):
         return self
+
+    def _no_capture_moves(self, player):
+        # The side to move has played floor(n/2) moves since the last capture.
+        return self.no_capture_count // 2 + int(
+            self.no_capture_count % 2 and player_id(player) != self.current_player)
+
+    def natural_limit_rounds(self, player):
+        """Effective complete rounds for this claimant (CNXA 2020, 4.2.4/22.2)."""
+        side = player_id(player)
+        checks = self.no_capture_checks[0 if side == RED else 1]
+        own_effective = self._no_capture_moves(side) - max(0, checks - NATURAL_LIMIT_CHECK_CAP)
+        return min(self.no_capture_count // 2, own_effective)
+
+    def natural_limit_status(self):
+        return dict(raw_plies=self.no_capture_count, required_rounds=NATURAL_LIMIT_ROUNDS,
+                    check_cap=NATURAL_LIMIT_CHECK_CAP,
+                    checks=dict(red=self.no_capture_checks[0], black=self.no_capture_checks[1]),
+                    effective_rounds=dict(red=self.natural_limit_rounds(RED),
+                                          black=self.natural_limit_rounds(BLACK)),
+                    claimant=self.current_player,
+                    eligible=self.natural_limit_rounds(self.current_player) >= NATURAL_LIMIT_ROUNDS)
 
     @classmethod
     def new_game(cls, max_ply=None):
@@ -122,12 +147,16 @@ class GameState:
         counts = dict(self.repetition_counts)
         counts[key] = counts.get(key, 0) + 1
         history = ((board.tobytes(), counts[key]),) + self.history[:7]
+        gave_check = bool(is_in_check(board, not self.turn))
+        checks = [0, 0] if captured else list(self.no_capture_checks)
+        if not captured:
+            checks[0 if self.turn else 1] += int(gave_check)
         return GameState(board, not self.turn, self.move_count + 1,
                          0 if captured else self.no_capture_count + 1,
                          counts, move, self._max_ply, history=history,
                          position_history=self.position_history + (key,),
-                         check_history=self.check_history +
-                         ((self.current_player, bool(is_in_check(board, not self.turn))),))
+                         check_history=self.check_history + ((self.current_player, gave_check),),
+                         no_capture_checks=checks)
 
     def apply_action(self, action):
         return self.apply(ActionEncoder.decode(action))
@@ -155,7 +184,8 @@ class GameState:
                             checkers.append(side)
                 result = (GameResult(-checkers[0], "perpetual_check") if len(checkers) == 1
                           else GameResult(None, "repetition"))
-            elif self.no_capture_count >= 120:
+            elif (self.no_capture_count >= 2 * NATURAL_LIMIT_ROUNDS and
+                  self.natural_limit_rounds(self.current_player) >= NATURAL_LIMIT_ROUNDS):
                 result = GameResult(None, "no_capture")
             elif self.move_count >= self._max_ply:
                 result = GameResult(None, "max_ply")

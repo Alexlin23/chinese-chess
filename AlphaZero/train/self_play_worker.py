@@ -100,6 +100,7 @@ def self_play_worker_fn(worker_id, config, request_queue, response_queue,
                 emit(dict(kind="board", worker=worker_id, episode=episode, sequence=sequence, ply=state.move_count,
                           board=state.board.tolist(), turn=state.current_player, started=started,
                           actor_step=evaluator.model_step, diagnostics=search.diagnostics,
+                          natural_limit=state.natural_limit_status(),
                           last_move=moves[-1] if moves else None))
                 move, pi = search.select_move(state, temperature=selfplay_temperature(state.move_count, config.num_sampling_moves),
                                               add_exploration_noise=True)
