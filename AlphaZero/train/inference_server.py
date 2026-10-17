@@ -9,6 +9,7 @@ from .config import AlphaZeroConfig
 from .trainer import create_model
 from ..model.neural_eval import autocast_context
 from ..model.cuda_graph import CudaGraphForward
+from .performance import Recorder
 
 @dataclass
 class BatchRequest:
@@ -28,7 +29,8 @@ class BatchResponse:
     error: object = None
 
 class InferenceServer:
-    def __init__(self, model_path, config, context=None, run_id=None):
+    def __init__(self, model_path, config, context=None, run_id=None,
+                 performance_queue=None, performance_options=None):
         self.config = config
         self.model_path = str(model_path)
         self.run_id = run_id
@@ -39,11 +41,13 @@ class InferenceServer:
         self.refresh_queue = self.context.Queue(maxsize=1)
         self.stop_event = self.context.Event()
         self._process = None
+        self.performance_queue, self.performance_options = performance_queue, performance_options
 
     def start(self):
         self._process = self.context.Process(target=_serve, args=(
             self.model_path, self.config, self.request_queue, self.response_queues,
-            self.ready, self.refresh_queue, self.stop_event, self.run_id), daemon=True)
+            self.ready, self.refresh_queue, self.stop_event, self.run_id,
+            self.performance_queue, self.performance_options), daemon=True)
         self._process.start()
         try:
             status = self.ready.get(timeout=90)
@@ -72,13 +76,18 @@ class InferenceServer:
             queue.cancel_join_thread()
             queue.close()
 
-def _serve(path, config, requests, responses, ready, refresh, stop, run_id):
+def _serve(path, config, requests, responses, ready, refresh, stop, run_id,
+           performance_queue=None, performance_options=None):
     torch.set_num_threads(config.torch_threads)
+    performance = (Recorder("inference", performance_queue, **(performance_options or {}))
+                   if performance_queue is not None else None)
     pending = None
     announced = False
     try:
         models, active_versions = {}, {}
         def load():
+            if performance is not None:
+                load_started = time.perf_counter()
             checkpoint = torch.load(path, map_location="cpu", weights_only=False)
             if checkpoint.get("kind") != "actor" or checkpoint.get("fingerprint") != config.fingerprint:
                 raise ValueError("inference actor specification mismatch")
@@ -94,6 +103,8 @@ def _serve(path, config, requests, responses, ready, refresh, stop, run_id):
                         config.channels_last, config.inference_batch_size)
                 else:
                     models[version] = torch.compile(model) if config.compile_model else model
+            if performance is not None:
+                performance.observe("data.actor_load_wall", time.perf_counter() - load_started)
             return version
         step = load()
         ready.put(dict(step=step, device=config.device, precision=config.precision))
@@ -105,10 +116,18 @@ def _serve(path, config, requests, responses, ready, refresh, stop, run_id):
             except Empty:
                 pass
             try:
+                if performance is not None:
+                    idle_started = time.perf_counter()
                 request = pending if pending is not None else requests.get(timeout=0.1)
                 pending = None
             except Empty:
+                if performance is not None:
+                    performance.observe("inference.idle_wait_wall", time.perf_counter() - idle_started)
+                    performance.flush()
                 continue
+            if performance is not None:
+                performance.observe("inference.idle_wait_wall", time.perf_counter() - idle_started)
+                batch_started = time.perf_counter()
             batch = [request]
             count = len(request.states)
             deadline = time.monotonic() + config.inference_wait_ms / 1000
@@ -125,6 +144,8 @@ def _serve(path, config, requests, responses, ready, refresh, stop, run_id):
                     break
                 batch.append(item)
                 count += len(item.states)
+            if performance is not None:
+                performance.observe("inference.batch_wait_wall", time.perf_counter() - batch_started)
             try:
                 for item in batch:
                     n = len(item.states)
@@ -145,6 +166,16 @@ def _serve(path, config, requests, responses, ready, refresh, stop, run_id):
                     groups.setdefault(version, []).append(item)
                 outgoing = []
                 for version, group in groups.items():
+                    if performance is not None:
+                        group_started = time.perf_counter()
+                        graph_cache = getattr(models[version], "cache", None)
+                        real_batch = sum(len(item.states) for item in group)
+                        executed_batch = (min(1 << (real_batch - 1).bit_length(), config.inference_batch_size)
+                                          if graph_cache is not None else real_batch)
+                        cold_graph = graph_cache is not None and executed_batch not in graph_cache
+                        gpu_sample = performance.cuda_sample(config.device,
+                            ("inference.prepare_cuda", "inference.compute_cuda_cold" if cold_graph
+                             else "inference.compute_cuda"))
                     array = torch.from_numpy(np.concatenate([x.states for x in group]))
                     masks = torch.from_numpy(np.concatenate([x.masks for x in group])).to(config.device)
                     if config.device == "cuda":
@@ -152,15 +183,34 @@ def _serve(path, config, requests, responses, ready, refresh, stop, run_id):
                     array = array.to(config.device, non_blocking=True)
                     if config.channels_last and config.device == "cuda":
                         array = array.contiguous(memory_format=torch.channels_last)
+                    if performance is not None:
+                        performance.observe("inference.prepare_host_wall", time.perf_counter() - group_started)
+                        if gpu_sample is not None:
+                            gpu_sample.mark()
+                        execution_started = time.perf_counter()
                     with torch.inference_mode(), autocast_context(config.device, config.precision):
                         logits, values = models[version](array)
                         raw_finite = torch.isfinite(logits).all()
-                        policies = logits.float().masked_fill(~masks, -torch.inf).softmax(1).cpu().numpy()
+                        policy_tensor = logits.float().masked_fill(~masks, -torch.inf).softmax(1)
+                        if performance is not None and gpu_sample is not None:
+                            gpu_sample.mark()  # Existing .cpu() below completes events.
+                        policies = policy_tensor.cpu().numpy()
+                        del policy_tensor
                         values = values.float().cpu().numpy()
                     if (not bool(raw_finite) or not np.isfinite(policies).all() or not np.isfinite(values).all()
                             or np.any(np.abs(values) > 1.00001)
                             or not np.allclose(policies.sum(1), 1, atol=1e-5)):
                         raise FloatingPointError("non-finite or unnormalized neural output")
+                    if performance is not None:
+                        performance.observe("inference.execution_wall", time.perf_counter() - execution_started)
+                        performance.observe("inference.service_wall", time.perf_counter() - group_started)
+                        performance.observe("inference.batch_size", len(array))
+                        performance.observe("inference.executed_batch_size", executed_batch)
+                        if cold_graph:
+                            performance.observe("inference.graph_warmup_wall", time.perf_counter() - execution_started)
+                        performance.increment("inference.positions", len(array))
+                        if gpu_sample is not None:
+                            gpu_sample.finish()
                     offset = 0
                     for item in group:
                         n = len(item.states)
@@ -173,6 +223,8 @@ def _serve(path, config, requests, responses, ready, refresh, stop, run_id):
                 for expired in list(models):
                     if expired not in keep:
                         del models[expired]
+                if performance is not None:
+                    performance.flush()
             except Exception as exc:
                 for item in batch:
                     try:
@@ -186,3 +238,6 @@ def _serve(path, config, requests, responses, ready, refresh, stop, run_id):
             ready.put(dict(error=repr(exc)))
         stop.set()
         raise
+    finally:
+        if performance is not None:
+            performance.flush(force=True)

@@ -1,7 +1,8 @@
 param(
     [ValidateSet('Status', 'Start', 'Resume', 'Stop')][string]$Action = 'Status',
     [string]$RunName = 'xiangqi-rules-20261016',
-    [string]$Config = 'config/local-train.yaml'
+    [string]$Config = 'config/local-train.yaml',
+    [switch]$Performance
 )
 $ErrorActionPreference = 'Stop'
 if ($RunName -notmatch '^[a-zA-Z0-9_-]+$') { throw 'RunName must be a simple directory name.' }
@@ -21,6 +22,8 @@ if ($Action -eq 'Resume' -and -not (Test-Path -LiteralPath "$runDirectory/learne
 New-Item -ItemType Directory -Path $runDirectory -Force | Out-Null
 $trainArguments = @('--cd', $projectDir, '--exec', 'bash', 'scripts/train.sh', '--config', $Config, '--output-dir', $runRelative)
 if ($Action -eq 'Resume') { $trainArguments += @('--resume', "$runRelative/learner.pt") }
+if ($Performance) { $trainArguments += '--performance' }
+else { $trainArguments += '--no-performance' }
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $process = Start-Process -FilePath wsl.exe -ArgumentList $trainArguments -WindowStyle Hidden -RedirectStandardOutput "$runDirectory/training-$stamp.log" -RedirectStandardError "$runDirectory/training-$stamp.stderr.log" -PassThru
 $process.Id | Set-Content -LiteralPath "$runDirectory/windows-process.pid"
