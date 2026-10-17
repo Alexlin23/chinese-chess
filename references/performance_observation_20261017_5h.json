@@ -1,0 +1,430 @@
+{
+  "session_id": "777738da21c14e83a17e116bdfdceac1",
+  "run_id": "12547b1e-9441-455f-bdb1-286e3cb2627a",
+  "interval_seconds": 5.0,
+  "gpu_sample_every": 64,
+  "full_session": {
+    "enabled": true,
+    "elapsed_seconds": 17999.565025099,
+    "sources": 34,
+    "metrics": {
+      "data.publish_wall": {
+        "count": 30,
+        "total": 10.931077784996546,
+        "mean": 0.36436925949988486,
+        "max": 2.7611394150000024,
+        "p95_upper_approx": 0.3535533905932738
+      },
+      "sgd.sample_wall": {
+        "count": 29453,
+        "total": 4909.665047611063,
+        "mean": 0.16669490536145937,
+        "max": 1.415908200000004,
+        "p95_upper_approx": 0.21022410381342863
+      },
+      "sgd.transfer_host_wall": {
+        "count": 29453,
+        "total": 750.5420913870627,
+        "mean": 0.025482704355653505,
+        "max": 0.5727404930003104,
+        "p95_upper_approx": 0.03125
+      },
+      "sgd.compute_wall": {
+        "count": 29452,
+        "total": 12119.607460013865,
+        "mean": 0.41150371655622253,
+        "max": 4.663228531000016,
+        "p95_upper_approx": 0.5
+      },
+      "sgd.update_wall": {
+        "count": 29452,
+        "total": 17788.70026337087,
+        "mean": 0.6039895512485016,
+        "max": 6.531110552999991,
+        "p95_upper_approx": 0.7071067811865476
+      },
+      "sgd.transfer_cuda": {
+        "count": 461,
+        "total": 13.538864284515387,
+        "mean": 0.02936846916380778,
+        "max": 0.45408642578125,
+        "p95_upper_approx": 0.03716272234383503
+      },
+      "sgd.compute_cuda": {
+        "count": 461,
+        "total": 191.6011546325684,
+        "mean": 0.4156207258840963,
+        "max": 4.65386083984375,
+        "p95_upper_approx": 0.5
+      },
+      "data.checkpoint_wall": {
+        "count": 294,
+        "total": 157.4013331839895,
+        "mean": 0.535378684299284,
+        "max": 1.3206055299997388,
+        "p95_upper_approx": 0.7071067811865476
+      },
+      "data.replay_write_wall": {
+        "count": 49,
+        "total": 4.221717923998199,
+        "mean": 0.08615750865302446,
+        "max": 0.4603976020007394,
+        "p95_upper_approx": 0.3535533905932738
+      },
+      "data.actor_load_wall": {
+        "count": 30,
+        "total": 14.433519806000604,
+        "mean": 0.4811173268666868,
+        "max": 0.5932127710000259,
+        "p95_upper_approx": 0.5932127710000259
+      },
+      "inference.idle_wait_wall": {
+        "count": 1022890,
+        "total": 1764.6316470852976,
+        "mean": 0.001725143121044587,
+        "max": 0.17199346699999296,
+        "p95_upper_approx": 0.0032847516220848223
+      },
+      "inference.batch_wait_wall": {
+        "count": 1021877,
+        "total": 2458.0121508437633,
+        "mean": 0.0024053894459350423,
+        "max": 0.16678577099992253,
+        "p95_upper_approx": 0.0032847516220848223
+      },
+      "inference.prepare_host_wall": {
+        "count": 4112370,
+        "total": 2726.410885407829,
+        "mean": 0.0006629780115621477,
+        "max": 0.2657301709987223,
+        "p95_upper_approx": 0.0023226701464896895
+      },
+      "inference.execution_wall": {
+        "count": 4112370,
+        "total": 10501.411565134194,
+        "mean": 0.0025536154492747966,
+        "max": 1.0050689650000209,
+        "p95_upper_approx": 0.005524271728019903
+      },
+      "inference.service_wall": {
+        "count": 4112370,
+        "total": 13275.283430965994,
+        "mean": 0.003228134489592618,
+        "max": 1.0089071989999923,
+        "p95_upper_approx": 0.0078125
+      },
+      "inference.batch_size": {
+        "count": 4112370,
+        "total": 8118177.0,
+        "mean": 1.9740872051882492,
+        "max": 32,
+        "p95_upper_approx": 6.727171322029716
+      },
+      "inference.executed_batch_size": {
+        "count": 4112370,
+        "total": 9424937.0,
+        "mean": 2.291850441472922,
+        "max": 32,
+        "p95_upper_approx": 9.513656920021768
+      },
+      "inference.graph_warmup_wall": {
+        "count": 53,
+        "total": 5.6852474750039335,
+        "mean": 0.10726882028309308,
+        "max": 1.0051063890000194,
+        "p95_upper_approx": 0.21022410381342863
+      },
+      "inference.prepare_cuda": {
+        "count": 64256,
+        "total": 89.34168449515124,
+        "mean": 0.0013904022113911734,
+        "max": 0.12316537475585937,
+        "p95_upper_approx": 0.004645340292979379
+      },
+      "inference.compute_cuda_cold": {
+        "count": 2,
+        "total": 1.159446548461914,
+        "mean": 0.579723274230957,
+        "max": 1.0030560913085937,
+        "p95_upper_approx": 1.0030560913085937
+      },
+      "inference.compute_cuda": {
+        "count": 64254,
+        "total": 62.49030659371763,
+        "mean": 0.0009725512278413426,
+        "max": 0.12268169403076172,
+        "p95_upper_approx": 0.0009765625
+      },
+      "communication.rtt_wall": {
+        "count": 8118145,
+        "total": 558522.0388028492,
+        "mean": 0.06879921937866953,
+        "max": 1.1608373210000025,
+        "p95_upper_approx": 0.21022410381342863
+      },
+      "mcts.hand_wall": {
+        "count": 10236,
+        "total": 574309.821150568,
+        "mean": 56.10686021400625,
+        "max": 87.28386374299953,
+        "p95_upper_approx": 87.28386374299953
+      },
+      "mcts.neural_sync_wall": {
+        "count": 10236,
+        "total": 562338.421895922,
+        "mean": 54.937321404447246,
+        "max": 86.48866711499068,
+        "p95_upper_approx": 86.48866711499068
+      },
+      "mcts.local_cpu_estimate_wall": {
+        "count": 10236,
+        "total": 11971.399254645847,
+        "mean": 1.1695388095589925,
+        "max": 1.7525341899872728,
+        "p95_upper_approx": 1.681792830507429
+      }
+    },
+    "counters": {
+      "sgd.updates": 29452,
+      "data.completed_games": 49,
+      "data.new_positions": 6994,
+      "inference.positions": 8118177,
+      "mcts.simulations": 8188800
+    },
+    "rates": {
+      "mcts_simulations_per_second": 454.944327186871,
+      "inference_positions_per_second": 451.02073237213403,
+      "new_positions_per_hour": 1398.8338031997257,
+      "completed_games_per_hour": 9.800236825391272,
+      "sgd_updates_per_second": 1.6362617629332412
+    },
+    "notes": [
+      "Cumulative current-session rates; startup and unfinished searches are included in wall time",
+      "MCTS local CPU is a wall-time estimate, not process CPU time",
+      "Request RTT includes inference and queueing; it is not pure IPC overhead",
+      "Concurrent module times overlap and must not be added",
+      "P95 is a fixed-histogram approximate upper bound",
+      "CUDA events are sampled and read without additional synchronization"
+    ],
+    "session_id": "777738da21c14e83a17e116bdfdceac1",
+    "step": 168652,
+    "run_id": "12547b1e-9441-455f-bdb1-286e3cb2627a",
+    "interval_seconds": 5.0,
+    "gpu_sample_every": 64,
+    "hardware": {
+      "cpu_percent": 19.7,
+      "ram_gb": 5.101840972900391,
+      "ram_total_gb": 15.199398040771484,
+      "memory_scope": "WSL",
+      "gpu": "NVIDIA GeForce RTX 5070",
+      "gpu_percent": 0.0,
+      "vram_gb": 11.423828125,
+      "vram_total_gb": 11.9404296875
+    }
+  },
+  "steady_window": {
+    "start_seconds": 65.02994254500001,
+    "end_seconds": 17999.565025099,
+    "seconds": 17934.535082554,
+    "start_step": 139273,
+    "end_step": 168652,
+    "metrics": {
+      "data.publish_wall": {
+        "count": 29,
+        "total": 8.169938369996544,
+        "mean": 0.2817220127585015,
+        "whole_session_p95_upper_approx": 0.3535533905932738
+      },
+      "sgd.sample_wall": {
+        "count": 29380,
+        "total": 4890.733939658063,
+        "mean": 0.16646473586310628,
+        "whole_session_p95_upper_approx": 0.21022410381342863
+      },
+      "sgd.transfer_host_wall": {
+        "count": 29380,
+        "total": 748.1847288090627,
+        "mean": 0.025465783826040256,
+        "whole_session_p95_upper_approx": 0.03125
+      },
+      "sgd.compute_wall": {
+        "count": 29379,
+        "total": 12082.374215976864,
+        "mean": 0.41125886571962506,
+        "whole_session_p95_upper_approx": 0.5
+      },
+      "sgd.update_wall": {
+        "count": 29379,
+        "total": 17730.15354909087,
+        "mean": 0.6034975169029194,
+        "whole_session_p95_upper_approx": 0.7071067811865476
+      },
+      "sgd.transfer_cuda": {
+        "count": 459,
+        "total": 13.057483777999884,
+        "mean": 0.02844767707625247,
+        "whole_session_p95_upper_approx": 0.03716272234383503
+      },
+      "sgd.compute_cuda": {
+        "count": 459,
+        "total": 186.49095623779303,
+        "mean": 0.40629837960303494,
+        "whole_session_p95_upper_approx": 0.5
+      },
+      "data.checkpoint_wall": {
+        "count": 294,
+        "total": 157.4013331839895,
+        "mean": 0.535378684299284,
+        "whole_session_p95_upper_approx": 0.7071067811865476
+      },
+      "data.replay_write_wall": {
+        "count": 49,
+        "total": 4.221717923998199,
+        "mean": 0.08615750865302446,
+        "whole_session_p95_upper_approx": 0.3535533905932738
+      },
+      "data.actor_load_wall": {
+        "count": 29,
+        "total": 13.89066363200061,
+        "mean": 0.4789884011034693,
+        "whole_session_p95_upper_approx": 0.5932127710000259
+      },
+      "inference.idle_wait_wall": {
+        "count": 1016503,
+        "total": 1752.2944661792976,
+        "mean": 0.001723845838309673,
+        "whole_session_p95_upper_approx": 0.0032847516220848223
+      },
+      "inference.batch_wait_wall": {
+        "count": 1015510,
+        "total": 2442.7997043357645,
+        "mean": 0.002405490545967804,
+        "whole_session_p95_upper_approx": 0.0032847516220848223
+      },
+      "inference.prepare_host_wall": {
+        "count": 4106003,
+        "total": 2722.735949068827,
+        "mean": 0.0006631110471835571,
+        "whole_session_p95_upper_approx": 0.0023226701464896895
+      },
+      "inference.execution_wall": {
+        "count": 4106003,
+        "total": 10480.760537657194,
+        "mean": 0.002552545757433006,
+        "whole_session_p95_upper_approx": 0.005524271728019903
+      },
+      "inference.service_wall": {
+        "count": 4106003,
+        "total": 13250.876786870991,
+        "mean": 0.003227196080195507,
+        "whole_session_p95_upper_approx": 0.0078125
+      },
+      "inference.batch_size": {
+        "count": 4106003,
+        "total": 8064406.0,
+        "mean": 1.9640526322070393,
+        "whole_session_p95_upper_approx": 6.727171322029716
+      },
+      "inference.executed_batch_size": {
+        "count": 4106003,
+        "total": 9353313.0,
+        "mean": 2.277960586000546,
+        "whole_session_p95_upper_approx": 9.513656920021768
+      },
+      "inference.graph_warmup_wall": {
+        "count": 47,
+        "total": 4.356088383003907,
+        "mean": 0.09268273155327462,
+        "whole_session_p95_upper_approx": 0.21022410381342863
+      },
+      "inference.prepare_cuda": {
+        "count": 64156,
+        "total": 89.2296616151931,
+        "mean": 0.0013908233308684004,
+        "whole_session_p95_upper_approx": 0.004645340292979379
+      },
+      "inference.compute_cuda_cold": {
+        "count": 1,
+        "total": 0.15639045715332034,
+        "mean": 0.15639045715332034,
+        "whole_session_p95_upper_approx": 1.0030560913085937
+      },
+      "inference.compute_cuda": {
+        "count": 64155,
+        "total": 62.39023862570672,
+        "mean": 0.0009724922239218568,
+        "whole_session_p95_upper_approx": 0.0009765625
+      },
+      "communication.rtt_wall": {
+        "count": 8061946,
+        "total": 556875.7492189832,
+        "mean": 0.06907460670401207,
+        "whole_session_p95_upper_approx": 0.21022410381342863
+      },
+      "mcts.hand_wall": {
+        "count": 10172,
+        "total": 572698.0846704419,
+        "mean": 56.3014239746797,
+        "whole_session_p95_upper_approx": 87.28386374299953
+      },
+      "mcts.neural_sync_wall": {
+        "count": 10172,
+        "total": 560804.125228237,
+        "mean": 55.13213971964579,
+        "whole_session_p95_upper_approx": 86.48866711499068
+      },
+      "mcts.local_cpu_estimate_wall": {
+        "count": 10172,
+        "total": 11893.959442204845,
+        "mean": 1.1692842550339013,
+        "whole_session_p95_upper_approx": 1.681792830507429
+      }
+    },
+    "counters": {
+      "sgd.updates": 29379,
+      "data.completed_games": 49,
+      "data.new_positions": 6994,
+      "inference.positions": 8064406,
+      "mcts.simulations": 8137600
+    },
+    "hardware": {
+      "gpu_percent": {
+        "mean": 69.24217002237137,
+        "min": 0.0,
+        "max": 99.0,
+        "samples": 3576
+      },
+      "vram_gb": {
+        "mean": 10.847775043257132,
+        "min": 9.615234375,
+        "max": 11.4677734375,
+        "samples": 3576
+      },
+      "cpu_percent": {
+        "mean": 17.504837807606265,
+        "min": 14.6,
+        "max": 25.3,
+        "samples": 3576
+      },
+      "ram_gb": {
+        "mean": 7.726585495925323,
+        "min": 5.101840972900391,
+        "max": 8.113540649414062,
+        "samples": 3576
+      }
+    },
+    "rates": {
+      "mcts_simulations_per_second": 453.7391107459447,
+      "inference_positions_per_second": 449.6579344197627,
+      "new_positions_per_hour": 1403.9059214025872,
+      "completed_games_per_hour": 9.835772111628078
+    }
+  },
+  "limitations": [
+    "First 60 seconds excluded using cumulative-count differences",
+    "Source reports may lag by one reporting interval",
+    "P95 is whole-session only; it is not a steady-window quantile",
+    "Hourly rates from a short window do not establish long-run throughput",
+    "GPU/CPU hardware snapshots are sampled, not kernel traces"
+  ]
+}
