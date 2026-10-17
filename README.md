@@ -2,6 +2,27 @@
 
 目标是在中国象棋上复现 AlphaZero 的学习与搜索方法，只缩减网络规模，并做硬件执行优化。**当前是重构中的开发版，还不能称为 100% 复现完成。** 主要缺口是完整中国象棋长捉责任裁定、独立规则验收及长期学习验证。唯一主审查与修复记录见 [ALPHAZERO_PAPER_REVIEW.md](ALPHAZERO_PAPER_REVIEW.md)，第 20 节记录收到 Data S1 后的核对与修正。
 
+## 可关闭的性能监控
+
+`codex/performance-monitoring` 基于main添加五模块粗粒度计时，实际短时观测与分析统一记录在主审查文档第25节。本轮仅增加观测，保留现有规则、MCTS/800次预算、模型、损失、随机数调用及checkpoint规格。
+
+在本分支PowerShell中，使用 `./scripts/training.ps1 -Action Resume -Performance` 开启；去掉 `-Performance` 则关闭，仍可正常恢复已有存档。WSL直接启动可使用：
+
+~~~bash
+bash scripts/train.sh --config config/local-train.yaml \
+  --output-dir AlphaZero/runs/xiangqi-rules-20261016 \
+  --resume AlphaZero/runs/xiangqi-rules-20261016/learner.pt --performance
+# 关闭：使用 --no-performance（默认关闭）。
+~~~
+
+默认每5秒聚合，GPU每64次实际批次/更新抽样一次；可用 `--performance-interval` 和 `--performance-gpu-every` 调整，开关不是训练配置字段，不写入checkpoint。运行中的8765页面显示MCTS、推理、请求往返、SGD、存储与产出速率；展开可查看样本数、累计值和近似P95上界。原始汇总追加到run目录的 `performance.jsonl`，最近一次开启监控的会话摘要为 `performance.json`，各自包含session_id；关闭后的新会话不会覆盖旧性能文件。
+
+MCTS本地时间是整手墙钟减同步神经调用时间的估算，RTT包含推理及排队，不能当作纯IPC。CUDA Event复用已有同步点读取，不新增synchronize；传输主机准备时间不等于DMA完成时间，CUDA区间包含流竞争/主机间隙。并发模块耗时相互重叠，不能相加当总周期。P95使用固定直方图近似，不取各worker的P95平均值。
+
+本次实际从138800步短时续训约300秒后停止，存档139200步；排除首60秒后每手800搜索约25.50秒，其中同步神经调用24.35秒，本地估算1.15秒。每次SGD约639ms，Replay采样179ms，计算更新432ms。期间没有新整局完成，小时产出和Replay写入不能作为稳定吞吐结论。见 `references/performance_observation_20261017.json`。当前训练保持停止，未进行后续优化。
+
+训练停止时现有监控服务随进程关闭，已连接页面可保留最后的性能数值，刷新后需等下次启动；离线分析读取上述文件。本轮浏览器策略拒绝读取先前的错误页面，页面内容通过本机HTTP及脚本检查，未完成真实浏览器截图验收。
+
 ## 当前训练路径
 
 - 纯神经网络 MCTS 自我对弈；每手新建搜索树、逐次完成 800 次模拟，根 Dirichlet 噪声；前 30 ply 按访问数采样，之后选择访问数最多的动作，训练目标始终保留归一化访问数；没有启发式监督、吃子权重或 Arena 回滚。
@@ -49,7 +70,7 @@ bash scripts/train.sh --config config/default.yaml \
 
 ## 浏览器训练实况
 
-当前持续训练目录：`AlphaZero/runs/xiangqi-v3-20261015`。在 PowerShell 可管理该 run：
+当前训练目录：`AlphaZero/runs/xiangqi-rules-20261016`（本轮短时观测后保持停止）。在PowerShell可管理该run：
 
 ~~~powershell
 .\scripts\training.ps1 -Action Status

@@ -5,6 +5,42 @@ const number = value => Number(value || 0).toLocaleString("zh-CN");
 const names = {1:"帥",2:"仕",3:"相",4:"馬",5:"車",6:"炮",7:"兵",
   "-1":"將","-2":"士","-3":"象","-4":"馬","-5":"車","-6":"砲","-7":"卒"};
 const phases = {starting:"正在启动",collecting:"收集首批完整对局",training:"持续训练与自对弈",failed:"训练异常",stopped:"已停止"};
+let performanceKey;
+const perfLabels={"mcts.hand_wall":"MCTS每手","mcts.local_cpu_estimate_wall":"MCTS本地墙钟估算","mcts.neural_sync_wall":"MCTS同步神经调用","communication.rtt_wall":"请求往返（含推理）","inference.batch_wait_wall":"推理等待合批","inference.idle_wait_wall":"服务空闲等请求","inference.prepare_host_wall":"推理准备（主机）","inference.execution_wall":"推理执行与回传（墙钟）","inference.service_wall":"每个实际批次服务","inference.compute_cuda":"推理CUDA执行抽样","inference.compute_cuda_cold":"推理CUDA冷图抽样","inference.prepare_cuda":"推理准备CUDA区间抽样","inference.graph_warmup_wall":"CUDA图首次准备与执行","inference.batch_size":"推理实际输入Batch","inference.executed_batch_size":"推理执行Batch（含填充）","sgd.sample_wall":"Replay采样","sgd.transfer_host_wall":"SGD传输准备（主机）","sgd.compute_wall":"SGD计算及参数更新","sgd.update_wall":"SGD完整更新","sgd.transfer_cuda":"SGD传输CUDA区间抽样","sgd.compute_cuda":"SGD计算CUDA区间抽样","data.replay_write_wall":"Replay写入","data.checkpoint_wall":"Checkpoint保存","data.publish_wall":"模型导出发布"};
+function renderPerformance(perf){
+  const key=perf?.enabled?perf.elapsed_seconds??"waiting":"off";
+  if(key===performanceKey)return;performanceKey=key;
+  $("perfStatus").textContent=!perf?.enabled?"未开启 · --performance启用":perf.elapsed_seconds==null?"采集中":"每"+number(perf.interval_seconds||5)+"秒汇总 · 本次运行累计平均";
+  $("perfDetails").hidden=!perf?.enabled;
+  $("perfGrid").hidden=!perf?.enabled;$("perfNote").hidden=!perf?.enabled;
+  if(!perf?.enabled)return;
+  const m=perf.metrics||{},r=perf.rates||{};
+  const ms=v=>v==null?"—":v>=1?v.toFixed(2)+" s":(v*1000).toFixed(v<.01?2:1)+" ms";
+  const mean=k=>ms(m[k]?.mean),numeric=v=>v==null?"—":Number(v).toLocaleString("zh-CN",{maximumFractionDigits:1});
+  $("perfMcts").textContent=mean("mcts.hand_wall");
+  $("perfMctsParts").textContent="本地估算 "+mean("mcts.local_cpu_estimate_wall")+" · 同步神经调用 "+mean("mcts.neural_sync_wall");
+  $("perfSimulations").textContent=numeric(r.mcts_simulations_per_second)+" 模拟/秒（完成整手）";
+  $("perfInference").textContent=numeric(r.inference_positions_per_second)+" 局面/秒";
+  $("perfBatch").textContent="平均输入 / 执行 Batch "+numeric(m["inference.batch_size"]?.mean)+" / "+numeric(m["inference.executed_batch_size"]?.mean);
+  $("perfService").textContent="服务 "+mean("inference.service_wall")+" · 合批等待 "+mean("inference.batch_wait_wall");
+  $("perfInferenceGpu").textContent="CUDA执行抽样 "+mean("inference.compute_cuda")+"（n="+number(m["inference.compute_cuda"]?.count)+"，冷图另计）";
+  $("perfRtt").textContent=mean("communication.rtt_wall");$("perfRttCount").textContent=number(m["communication.rtt_wall"]?.count)+" 个请求";
+  $("perfSgd").textContent=mean("sgd.update_wall");
+  $("perfSgdParts").textContent="采样 "+mean("sgd.sample_wall")+" · 传输准备 "+mean("sgd.transfer_host_wall")+" · 计算更新 "+mean("sgd.compute_wall");
+  $("perfSgdGpu").textContent="CUDA传输 / 计算抽样 "+mean("sgd.transfer_cuda")+" / "+mean("sgd.compute_cuda")+"（n="+number(m["sgd.compute_cuda"]?.count)+"，含首次预热）";
+  $("perfCheckpoint").textContent="Checkpoint "+mean("data.checkpoint_wall");
+  $("perfStorage").textContent="Replay写入 "+mean("data.replay_write_wall")+" · 模型发布 "+mean("data.publish_wall");
+  $("perfPositions").textContent=numeric(r.new_positions_per_hour)+" 局面/小时";
+  $("perfGames").textContent=numeric(r.completed_games_per_hour)+" 完整对局/小时";
+  $("perfElapsed").textContent="已观测 "+numeric(perf.elapsed_seconds)+" 秒 · "+number(perf.sources)+" 个统计来源";
+  const rows=document.createDocumentFragment();
+  for(const [name,stat] of Object.entries(m)){
+    const batch=name.endsWith("batch_size"),row=document.createElement("tr");
+    for(const value of [perfLabels[name]||name,number(stat.count),batch?numeric(stat.mean):ms(stat.mean),batch?numeric(stat.total):ms(stat.total),batch?numeric(stat.p95_upper_approx):ms(stat.p95_upper_approx)]){
+      const cell=document.createElement("td");cell.textContent=value;row.append(cell);
+    }rows.append(row);
+  }$("perfRows").replaceChildren(rows);
+}
 function draw(canvas, game) {
   const ctx = canvas.getContext("2d"), scale = 38, pad = 28, width=360, height=398;
   canvas.width=720; canvas.height=796; ctx.scale(2,2);
@@ -41,6 +77,7 @@ function makeCard(worker){
   return {card,title,turn,canvas,detail,model,key:""};
 }
 function render(state){
+  renderPerformance(state.performance);
   const games=state.boards||{}, keys=Object.keys(games).sort((a,b)=>Number(a)-Number(b));
   $("active").textContent=number(keys.length);$("workers").textContent=number(state.workers)+" 盘并发 · "+number(state.actor_processes||state.workers)+" 个工作进程";
   $("games").textContent=number(state.completed_games);$("positions").textContent=number(state.positions)+" 个回放局面";

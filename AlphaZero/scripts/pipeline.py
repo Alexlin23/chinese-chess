@@ -18,6 +18,7 @@ from AlphaZero.train.replay import ReplayBuffer
 from AlphaZero.train.inference_server import InferenceServer
 from AlphaZero.train.self_play_worker import self_play_group_fn
 from AlphaZero.train.live import LiveTraining
+from AlphaZero.train.performance import Recorder, Hub
 
 @contextmanager
 def run_lock(directory):
@@ -42,7 +43,10 @@ def run_lock(directory):
         stream.close()
 
 def pipeline(config, max_iterations=None, checkpoint=None, resume=None,
-             output_dir=None, enable_monitor=True):
+             output_dir=None, enable_monitor=True, performance=False,
+             performance_interval=5.0, performance_gpu_every=64):
+    if performance_interval <= 0 or performance_gpu_every < 1:
+        raise ValueError("performance interval and GPU sampling period must be positive")
     config.__post_init__()
     if checkpoint is not None:
         raise ValueError("legacy WDL/18-channel weights require explicit migration; fresh v3 run recommended")
@@ -50,9 +54,19 @@ def pipeline(config, max_iterations=None, checkpoint=None, resume=None,
     config.checkpoint_dir = str(directory)
     directory.mkdir(parents=True, exist_ok=True)
     with run_lock(directory):
-        return _pipeline(config, directory, max_iterations, resume, enable_monitor)
+        options = dict(interval=performance_interval, gpu_every=performance_gpu_every) if performance else None
+        return _pipeline(config, directory, max_iterations, resume, enable_monitor, options)
 
-def _pipeline(config, directory, max_iterations, resume, enable_monitor):
+def _pipeline(config, directory, max_iterations, resume, enable_monitor, performance_options=None):
+    performance = Recorder("learner", **performance_options) if performance_options is not None else None
+    performance_hub = Hub(performance) if performance is not None else None
+    def storage_call(name, function, *args):
+        if performance is None:
+            return function(*args)
+        started = time.perf_counter()
+        result = function(*args)
+        performance.observe(name, time.perf_counter() - started)
+        return result
     if config.device == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA requested but unavailable; install a CUDA wheel or explicitly select CPU")
     torch.set_num_threads(config.torch_threads)
@@ -63,6 +77,7 @@ def _pipeline(config, directory, max_iterations, resume, enable_monitor):
         torch.cuda.manual_seed_all(config.seed)
         torch.backends.cudnn.benchmark = True
     trainer = Trainer(config, config.device)
+    trainer.performance = performance
     learner = directory / "learner.pt"
     recovery = None
     if resume:
@@ -87,17 +102,18 @@ def _pipeline(config, directory, max_iterations, resume, enable_monitor):
     config_file.replace(directory / "config.json")
     actor = directory / "latest.pt"
     trainer.run_id = replay.run_id
-    trainer.export_actor(actor)
+    storage_call("data.publish_wall", trainer.export_actor, actor)
     # Initial recovery point exists even if interrupted before the first update.
     if not resume:
-        trainer.save_checkpoint(learner, replay.recovery_marker())
+        storage_call("data.checkpoint_wall", trainer.save_checkpoint, learner, replay.recovery_marker())
     context = mp.get_context("spawn")
     stop = context.Event()
     collector_stop = threading.Event()
     shutting_down = threading.Event()
     results = context.Queue(maxsize=config.num_workers * 2)
     events = context.Queue(maxsize=max(32, config.num_workers * 4))
-    server = InferenceServer(actor, config, context, replay.run_id)
+    performance_queue = context.Queue(maxsize=max(64, config.num_workers * 2)) if performance else None
+    server = InferenceServer(actor, config, context, replay.run_id, performance_queue, performance_options)
     processes = []
     live = None
     collector = None
@@ -108,6 +124,40 @@ def _pipeline(config, directory, max_iterations, resume, enable_monitor):
         step=trainer.global_optimizer_step, run_id=replay.run_id, resumed=bool(resume),
         config=config.to_dict(), config_changes=trainer.resume_config_changes)) + "\n")
     metrics.flush()
+    performance_log = (directory / "performance.jsonl").open("a", encoding="utf-8") if performance else None
+    last_performance = time.perf_counter() if performance else None
+    def drain_performance():
+        if performance_queue is not None:
+            for _ in range(200):
+                try:
+                    performance_hub.receive(performance_queue.get_nowait())
+                except Empty:
+                    break
+    def publish_performance(force=False):
+        nonlocal last_performance
+        if performance is None:
+            return
+        now = time.perf_counter()
+        if not force and now - last_performance < performance_options["interval"]:
+            return
+        last_performance = now
+        report = performance_hub.snapshot()
+        report.update(session_id=session_id, step=trainer.global_optimizer_step, run_id=replay.run_id,
+                      interval_seconds=performance_options["interval"],
+                      gpu_sample_every=performance_options["gpu_every"])
+        if live:
+            with live.lock:
+                report["hardware"] = dict(live.state["hardware"])
+            live.update(performance=report)
+        try:
+            payload = json.dumps(report, allow_nan=False)
+            performance_log.write(payload + "\n")
+            performance_log.flush()
+            temporary = directory / "performance.json.tmp"
+            temporary.write_text(payload, encoding="utf-8")
+            temporary.replace(directory / "performance.json")
+        except OSError:
+            performance.increment("monitor.output_errors")
     try:
         if enable_monitor:
             live = LiveTraining(config.telemetry_host, config.telemetry_port, config.telemetry_interval)
@@ -117,15 +167,19 @@ def _pipeline(config, directory, max_iterations, resume, enable_monitor):
                         actor_processes=min(config.actor_processes, config.num_workers),
                         actor_step=trainer.global_optimizer_step, step=trainer.global_optimizer_step,
                         positions=len(replay), completed_games=replay.generation, config=config.to_dict())
+            live.update(performance=dict(enabled=performance is not None))
         ready = server.start()
         sequences = replay.next_sequences()
         process_count = min(config.actor_processes, config.num_workers)
         for group in range(process_count):
             worker_ids = list(range(group, config.num_workers, process_count))
-            process = context.Process(target=self_play_group_fn, args=(
+            worker_args = (
                 worker_ids, config, server.request_queue,
                 {worker:server.response_queues[worker] for worker in worker_ids},
-                results, events, stop, sequences), daemon=True)
+                results, events, stop, sequences)
+            if performance is not None:
+                worker_args += (performance_queue, performance_options)
+            process = context.Process(target=self_play_group_fn, args=worker_args, daemon=True)
             process.start()
             processes.append(process)
         def collect():
@@ -135,10 +189,17 @@ def _pipeline(config, directory, max_iterations, resume, enable_monitor):
                         message = results.get(timeout=0.05)
                         if message.get("kind") != "game":
                             raise RuntimeError("invalid reliable worker message")
-                        replay.add_game(message["episode"], message["samples"],
+                        if performance is not None:
+                            write_started = time.perf_counter()
+                        added = replay.add_game(message["episode"], message["samples"],
                             worker=message["worker"], sequence=message["sequence"],
                             reason=message["reason"], actor_start=message["actor_start"],
                             actor_end=message["actor_end"], trace=message["trace"])
+                        if performance is not None:
+                            performance.observe("data.replay_write_wall", time.perf_counter() - write_started)
+                            if added:
+                                performance.increment("data.completed_games")
+                                performance.increment("data.new_positions", len(message["samples"]))
                         if live:
                             live.complete(message, len(replay), replay.generation)
                     except Empty:
@@ -151,6 +212,8 @@ def _pipeline(config, directory, max_iterations, resume, enable_monitor):
                             break
                         if live:
                             live.event(event)
+                    drain_performance()
+                    publish_performance()
                     failed = [(i,p.exitcode) for i,p in enumerate(processes)
                               if p.exitcode is not None]
                     if not shutting_down.is_set() and (failed or not server._process.is_alive() or stop.is_set()):
@@ -193,11 +256,11 @@ def _pipeline(config, directory, max_iterations, resume, enable_monitor):
                 live.update(**stats, positions=len(replay), completed_games=replay.generation)
             step = trainer.global_optimizer_step
             if step % config.recovery_interval == 0 and step % config.checkpoint_interval != 0:
-                trainer.save_checkpoint(learner, replay.recovery_marker())
+                storage_call("data.checkpoint_wall", trainer.save_checkpoint, learner, replay.recovery_marker())
             if step % config.checkpoint_interval == 0 or step == limit:
                 trainer.current_iteration = step // config.checkpoint_interval
-                trainer.save_checkpoint(learner, replay.recovery_marker())
-                trainer.export_actor(actor)
+                storage_call("data.checkpoint_wall", trainer.save_checkpoint, learner, replay.recovery_marker())
+                storage_call("data.publish_wall", trainer.export_actor, actor)
                 server.refresh()
                 if live:
                     live.update(actor_step=step)
@@ -220,6 +283,13 @@ def _pipeline(config, directory, max_iterations, resume, enable_monitor):
         if collector:
             collector.join(10)
         server.stop()
+        drain_performance()
+        publish_performance(force=True)
+        if performance_log:
+            performance_log.close()
+        if performance_queue is not None:
+            performance_queue.cancel_join_thread()
+            performance_queue.close()
         for queue in (results, events):
             queue.cancel_join_thread()
             queue.close()
@@ -240,6 +310,10 @@ def main():
     parser.add_argument("--actor-processes", type=int, help="CPU processes sharing the independent games")
     parser.add_argument("--device", choices=("cpu", "cuda"))
     parser.add_argument("--no-monitor", action="store_true")
+    parser.add_argument("--performance", action=argparse.BooleanOptionalAction, default=False,
+                        help="optional five-module performance accounting; checkpoint format unchanged")
+    parser.add_argument("--performance-interval", type=float, default=5.0)
+    parser.add_argument("--performance-gpu-every", type=int, default=64)
     args = parser.parse_args()
     config = AlphaZeroConfig.from_yaml(args.config)
     if args.workers is not None:
@@ -250,7 +324,9 @@ def main():
         config.device = args.device
     config.__post_init__()
     result = pipeline(config, args.max_iterations, resume=args.resume,
-                      output_dir=args.output_dir, enable_monitor=not args.no_monitor)
+                      output_dir=args.output_dir, enable_monitor=not args.no_monitor,
+                      performance=args.performance, performance_interval=args.performance_interval,
+                      performance_gpu_every=args.performance_gpu_every)
     print(json.dumps(result), flush=True)
 
 if __name__ == "__main__":

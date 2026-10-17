@@ -3,6 +3,7 @@ from pathlib import Path
 import json
 import os
 import random
+import time
 import numpy as np
 import torch
 from torch.nn import functional as F
@@ -45,14 +46,24 @@ class Trainer:
         self.global_optimizer_step = 0
         self.current_iteration = 0
         self.resume_config_changes = {}
+        self.performance = None  # Runtime observer; never serialized in checkpoints/config.
 
     def step(self, replay):
+        performance = self.performance
+        if performance is not None:
+            step_started = time.perf_counter()
         self.model.train()
         decay = sum(self.global_optimizer_step >= milestone for milestone in self.config.lr_milestones)
         lr = self.config.learning_rate * self.config.lr_decay_rate ** decay
         for group in self.optimizer.param_groups:
             group["lr"] = lr
+        if performance is not None:
+            sample_started = time.perf_counter()
         states, policies, values, _ = replay.sample(self.config.batch_size)
+        if performance is not None:
+            performance.observe("sgd.sample_wall", time.perf_counter() - sample_started)
+            transfer_started = time.perf_counter()
+            gpu_sample = performance.cuda_sample(self.device, ("sgd.transfer_cuda", "sgd.compute_cuda"))
         def transfer(array):
             tensor = torch.from_numpy(array)
             if str(self.device).startswith("cuda"):
@@ -61,6 +72,11 @@ class Trainer:
         x, pi, z = transfer(states), transfer(policies), transfer(values)
         if str(self.device).startswith("cuda") and self.config.channels_last:
             x = x.contiguous(memory_format=torch.channels_last)
+        if performance is not None:
+            performance.observe("sgd.transfer_host_wall", time.perf_counter() - transfer_started)
+            if gpu_sample is not None:
+                gpu_sample.mark()
+            compute_started = time.perf_counter()
         self.optimizer.zero_grad(set_to_none=True)
         with autocast_context(self.device, self.config.precision):
             logits, v = self.forward_model(x)
@@ -82,14 +98,24 @@ class Trainer:
         self.optimizer.step()
         updated = list(self.model.parameters()) + list(self.model.buffers()) + [value for state in self.optimizer.state.values()
                     for value in state.values() if isinstance(value, torch.Tensor)]
-        if not bool(torch.stack([torch.isfinite(value).all() for value in updated]).all()):
+        updated_finite = torch.stack([torch.isfinite(value).all() for value in updated]).all()
+        if performance is not None and gpu_sample is not None:
+            gpu_sample.mark()  # Before the existing bool/D2H synchronization.
+        if not bool(updated_finite):
             raise FloatingPointError("non-finite parameters or optimizer state after SGD")
         self.global_optimizer_step += 1
-        return dict(step=self.global_optimizer_step, loss=float(loss.detach() + regularization),
+        stats = dict(step=self.global_optimizer_step, loss=float(loss.detach() + regularization),
                     data_loss=float(loss.detach()), data_loss_per_position=float(loss.detach()) / (self.config.batch_size if self.config.loss_reduction == "sum" else 1),
                     regularization=float(regularization),
                     policy_loss=float(policy_loss.detach()), value_loss=float(value_loss.detach()),
                     lr=lr, replay_positions=len(replay))
+        if performance is not None:
+            performance.observe("sgd.compute_wall", time.perf_counter() - compute_started)
+            performance.observe("sgd.update_wall", time.perf_counter() - step_started)
+            performance.increment("sgd.updates")
+            if gpu_sample is not None:
+                gpu_sample.finish()
+        return stats
 
     def train(self, replay, updates=None):
         stats = {}
