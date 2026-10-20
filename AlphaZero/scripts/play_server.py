@@ -174,7 +174,9 @@ def main():
         if signature == next_signature:
             return current
         candidate = ModelPlayer(current.path, args.device, args.simulations)
-        if candidate.config.fingerprint != current.config.fingerprint or candidate.step < current.step:
+        differences = {key for key in candidate.config.spec.keys() | current.config.spec.keys()
+                       if candidate.config.spec.get(key) != current.config.spec.get(key)}
+        if differences - {"max_game_ply"} or candidate.step < current.step:
             raise ValueError("新模型的规格不一致或版本倒退")
         signature = next_signature
         return candidate

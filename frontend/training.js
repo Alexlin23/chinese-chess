@@ -86,8 +86,21 @@ function render(state){
   if(state.value_loss!=null)$("lossDetail").textContent="策略 "+state.policy_loss.toFixed(3)+" / 价值 "+state.value_loss.toFixed(3);
   $("phase").textContent=phases[state.phase]||state.phase;
   $("rule").textContent="国规2020开发版 · 长捉裁定尚未完成完整验收";
-  const h=state.hardware||{};$("gpu").textContent=(h.gpu||"GPU")+" · "+(h.gpu_percent??"—")+"%";
-  $("vram").textContent="显存 · "+(h.vram_gb??0).toFixed(1)+" / "+(h.vram_total_gb??0).toFixed(1)+" GB";
+  const h=state.hardware||{}, age=h.gpu_sampled_at?Math.max(0,Math.floor(Date.now()/1000-h.gpu_sampled_at)):null;
+  if(h.gpu_status==="disabled"){
+    $("gpu").textContent="GPU · 监控已禁用";
+    $("gpu").title=h.gpu_sample_error||"训练期间不查询GPU";
+    $("vram").textContent="显存 · 监控已禁用";
+  }else{
+    const stale=h.gpu_status==="stale"||h.gpu_status==="unavailable"||h.gpu==="unavailable"||(age!=null&&age>15);
+    $("gpu").textContent=(h.gpu&&h.gpu!=="unavailable"?h.gpu:"GPU")+" · "+(stale?"采样失败/过期"+(age==null?"":" · 上次更新 "+age+" 秒前"):(h.gpu_percent??"—")+"%");
+    $("gpu").title=h.gpu_sample_error||"";
+    $("vram").textContent="显存 · "+(Number.isFinite(h.vram_gb)&&Number.isFinite(h.vram_total_gb)?h.vram_gb.toFixed(1)+" / "+h.vram_total_gb.toFixed(1)+" GB"+(stale?"（上次读数）":""):"—（暂未读取）");
+  }
+  const d=state.inference_diagnostics;$("inferenceHealth").hidden=!d;
+  if(d){const names={starting:"启动",actor_read:"读取模型",model_create:"创建模型",weights_load:"加载权重",idle:"等待请求",prepare:"准备输入",forward:"执行网络",graph_allocate:"分配图缓冲",graph_warmup:"图预热",graph_capture:"图捕获",result_copy:"回传结果",respond:"发送结果",failed:"异常",stopped:"停止"};
+    $("inferenceHealth").textContent=(d.stalled?"推理停顿告警 · ":"推理监控 · ")+(names[d.stage]||d.stage)+" · 本阶段 "+d.stage_seconds.toFixed(1)+" 秒 · 模型 "+number(d.model_step)+" · 批量 "+d.batch_size+" · 请求超时上限 "+d.request_timeout_seconds+" 秒";
+    const lg=state.learner_gpu;if(lg)$("inferenceHealth").textContent+=" · CUDA内存池保留：训练 "+lg.reserved_gb.toFixed(2)+" / 推理 "+d.gpu_reserved_gb.toFixed(2)+" GB（非整卡总显存）";}
   $("cpu").textContent="CPU · "+(h.cpu_percent??"—")+"%";$("ram").textContent=(h.memory_scope||"系统")+"内存 · "+(h.ram_gb??0).toFixed(1)+" / "+(h.ram_total_gb??0).toFixed(1)+" GB";
   $("empty").hidden=keys.length>0;
   for(const [worker,card] of cards)if(!Object.hasOwn(games,worker)){card.card.remove();cards.delete(worker);}

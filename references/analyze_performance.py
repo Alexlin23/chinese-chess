@@ -27,8 +27,14 @@ def main():
     counters = {name: value - baseline["counters"].get(name, 0) for name, value in final["counters"].items()}
     hardware = {}
     for key in ("gpu_percent", "vram_gb", "cpu_percent", "ram_gb"):
-        values = [row.get("hardware", {}).get(key) for row in rows
-                  if row["elapsed_seconds"] >= baseline["elapsed_seconds"]]
+        samples = [row.get("hardware", {}) for row in rows
+                   if row["elapsed_seconds"] >= baseline["elapsed_seconds"]]
+        if key in ("gpu_percent", "vram_gb"):
+            samples = [sample for sample in samples
+                       if sample.get("gpu_status") not in ("stale", "unavailable")
+                       and sample.get("gpu_sample_age_seconds", 0) <= 15
+                       and sample.get("gpu") != "unavailable"]
+        values = [sample.get(key) for sample in samples]
         values = [value for value in values if value is not None]
         if values:
             hardware[key] = dict(mean=statistics.mean(values), min=min(values), max=max(values), samples=len(values))

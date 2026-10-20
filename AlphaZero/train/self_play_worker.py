@@ -9,11 +9,13 @@ from .replay import pack_sample
 from ..engine import GameState
 from ..search import MCTS
 from .performance import Recorder
+from .runtime_diagnostics import report_failure
 
 
 def self_play_group_fn(worker_ids, config, request_queue, response_queues,
                        result_queue, event_queue, stop_event, start_sequences,
-                       performance_queue=None, performance_options=None):
+                       performance_queue=None, performance_options=None,
+                       failure_queue=None, request_timeout=300):
     """Independent games share a CPU process while each waits for its own inference.
 
     Each game still has a private RNG, search tree, response queue and pinned
@@ -26,7 +28,8 @@ def self_play_group_fn(worker_ids, config, request_queue, response_queues,
                     event_queue, stop_event, start_sequences.get(worker, 0))
             if performance_queue is not None:
                 args += (performance_queue, performance_options)
-            futures.append(pool.submit(self_play_worker_fn, *args))
+            kwargs = dict(failure_queue=failure_queue, request_timeout=request_timeout) if failure_queue is not None else {}
+            futures.append(pool.submit(self_play_worker_fn, *args, **kwargs))
         done, _ = wait(futures, return_when=FIRST_COMPLETED)
         failures = [future.exception() for future in done if future.exception() is not None]
         if failures:
@@ -43,6 +46,7 @@ class BatchRemoteEvaluator:
         self._request_counter, self.model_step = 0, 0
         self.pinned_step = None
         self.performance = None
+        self.request_timeout = 300
 
     def evaluate(self, state):
         policies, values = self.evaluate_batch([state])
@@ -59,7 +63,7 @@ class BatchRemoteEvaluator:
         if performance is not None:
             sent_at = time.perf_counter()
         self.request_queue.put(request, timeout=10)
-        deadline = time.monotonic() + 120
+        deadline = time.monotonic() + self.request_timeout
         while True:
             if self.stop_event is not None and self.stop_event.is_set():
                 raise InterruptedError("self-play cancelled")
@@ -68,7 +72,9 @@ class BatchRemoteEvaluator:
                 break
             except Empty:
                 if time.monotonic() >= deadline:
-                    raise TimeoutError("neural inference timed out")
+                    raise TimeoutError(f"neural inference timed out after {self.request_timeout:g}s: "
+                                       f"worker={self.worker_id} request={request.request_id} "
+                                       f"model={self.pinned_step}")
         if performance is not None:
             performance.observe("communication.rtt_wall", time.perf_counter() - sent_at)
         if response.worker_id != self.worker_id or response.request_id != request.request_id:
@@ -94,8 +100,10 @@ def selfplay_temperature(ply, num_sampling_moves=30):
 
 def self_play_worker_fn(worker_id, config, request_queue, response_queue,
                         result_queue, event_queue, stop_event, start_sequence=0,
-                        performance_queue=None, performance_options=None):
+                        performance_queue=None, performance_options=None,
+                        failure_queue=None, request_timeout=300):
     evaluator = BatchRemoteEvaluator(worker_id, request_queue, response_queue, stop_event)
+    evaluator.request_timeout = request_timeout
     performance = None
     if performance_queue is not None:
         performance = Recorder(f"worker:{worker_id}", performance_queue, **(performance_options or {}))
@@ -172,6 +180,8 @@ def self_play_worker_fn(worker_id, config, request_queue, response_queue,
         if not stop_event.is_set():
             raise
     except BaseException as exc:
+        report_failure(failure_queue, "worker", exc, worker=worker_id,
+                       model_step=evaluator.model_step)
         emit(dict(kind="worker_error", worker=worker_id, error=repr(exc)))
         raise
     finally:

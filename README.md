@@ -4,14 +4,14 @@
 
 ## 可关闭的性能监控
 
-`codex/performance-monitoring` 基于main添加五模块粗粒度计时，实际短时观测与分析统一记录在主审查文档第25节。本轮仅增加观测，保留现有规则、MCTS/800次预算、模型、损失、随机数调用及checkpoint规格。
+main 已集成五模块粗粒度计时，历史观测与分析统一记录在主审查文档第25节及后续记录。监控不改变规则、搜索预算、模型、损失或随机数调用。
 
-在本分支PowerShell中，使用 `./scripts/training.ps1 -Action Resume -Performance` 开启；去掉 `-Performance` 则关闭，仍可正常恢复已有存档。WSL直接启动可使用：
+PowerShell中使用 `./scripts/training.ps1 -Action Resume -Performance` 开启；去掉 `-Performance` 则关闭，仍可正常恢复已有存档。WSL直接启动示例：
 
 ~~~bash
 bash scripts/train.sh --config config/local-train.yaml \
-  --output-dir AlphaZero/runs/xiangqi-rules-20261016 \
-  --resume AlphaZero/runs/xiangqi-rules-20261016/learner.pt --performance
+  --output-dir AlphaZero/runs/xiangqi-rules-ply300-20261020 \
+  --resume AlphaZero/runs/xiangqi-rules-ply300-20261020/learner.pt --performance
 # 关闭：使用 --no-performance（默认关闭）。
 ~~~
 
@@ -19,20 +19,20 @@ bash scripts/train.sh --config config/local-train.yaml \
 
 MCTS本地时间是整手墙钟减同步神经调用时间的估算，RTT包含推理及排队，不能当作纯IPC。CUDA Event复用已有同步点读取，不新增synchronize；传输主机准备时间不等于DMA完成时间，CUDA区间包含流竞争/主机间隙。并发模块耗时相互重叠，不能相加当总周期。P95使用固定直方图近似，不取各worker的P95平均值。
 
-本次实际从138800步短时续训约300秒后停止，存档139200步；排除首60秒后每手800搜索约25.50秒，其中同步神经调用24.35秒，本地估算1.15秒。每次SGD约639ms，Replay采样179ms，计算更新432ms。期间没有新整局完成，小时产出和Replay写入不能作为稳定吞吐结论。见 `references/performance_observation_20261017.json`。当前训练保持停止，未进行后续优化。
+早期从138800步短时续训约300秒、存档139200步的观测，见 `references/performance_observation_20261017.json`。后续长窗口数据以主审查报告为准；历史“停止”描述不代表当前运行状态，当前状态用 Status 查询。
 
 训练停止时现有监控服务随进程关闭，已连接页面可保留最后的性能数值，刷新后需等下次启动；离线分析读取上述文件。本轮浏览器策略拒绝读取先前的错误页面，页面内容通过本机HTTP及脚本检查，未完成真实浏览器截图验收。
 
 ## 当前训练路径
 
-- 纯神经网络 MCTS 自我对弈；每手新建搜索树、逐次完成 800 次模拟，根 Dirichlet 噪声；前 30 ply 按访问数采样，之后选择访问数最多的动作，训练目标始终保留归一化访问数；没有启发式监督、吃子权重或 Arena 回滚。
+- 纯神经网络 MCTS 自我对弈；每手新建搜索树，模拟数由 num_simulations 控制（论文参考配置800，本机当前400），根 Dirichlet 噪声；前30 ply按访问数采样，之后选择访问数最多的动作，训练目标始终保留归一化访问数；没有启发式监督、吃子权重或 Arena 回滚。
 - 连续 SGD learner 与并行 actor 同时运行。每局固定一个已发布网络版本，双方使用同一版本；中心服务按版本合批，保存每手模型版本。
-- 按 Data S1 异步运行，不按固定对局数限制每次更新；每 1000 次更新发布网络。4400 万局是原国际象棋实验的数据量，不是伪代码规定的每步配额。默认 8 actor 与原实验 5000 actor 的数据生成速度不同，日志记录生成量和数据复用比；尚未证明同等学习效果。
+- 按 Data S1 异步运行，不按固定对局数限制每次更新；发布间隔由 checkpoint_interval 控制（默认1000，本机当前8000）。4400万局是原国际象棋实验的数据量，不是伪代码规定的每步配额。日志记录生成量和数据复用比；尚未证明同等学习效果。
 - 8 帧历史及重复特征，131 输入通道；当前玩家视角下同时变换棋盘与动作。
 - Policy CE + 标量 tanh value 的最终结果 MSE。完整 batch=4096；SGD momentum=0.9，初始 LR=0.2，100k/300k/500k 更新后各降 10 倍，总预算 700k 更新。
 - 已取得用户提供的官方 Data S1：正则项采用 c/2 × 参数平方和，SGD weight_decay=1e-4。**损失归一化仍有来源差异**：默认按局面取 batch 均值；Data S1 字面求和可用 loss_reduction: sum 核对，但完整 4096 batch、LR=0.2 的短检查出现非有限推理。详情、复现命令及失败证据见主报告第 20 节，不能称已完全复现原优化器。
 - 保留论文的 19 个残差块，通道缩为 128，约 725 万参数；完整 4096 batch 的 CUDA 实测预留峰值约 7.97GB。平铺 8100 动作头属于架构选择。BF16、channels-last、有界队列、跨对局合批。默认单树 batch=1、virtual_loss=0、reuse_tree=false；单树批量搜索和复用是可选实验，与默认参考搜索分开。
-- 最近 100 万**完整对局**存入 SQLite，均匀抽局面；不将窗口偷偷缩为 100 万局面。SQLite 内存缓存默认 256MB，数据保存在磁盘，磁盘需求随对局长度增长。
+- Replay存入SQLite，均匀抽局面；论文参考配置保留最近100万完整对局，本机配置额外限定最近至多10万局面，按整局淘汰，因此实际可略少。每次SGD从池中抽4096个局面，可以重复抽中。SQLite内存缓存默认256MB。
 - 原子 learner checkpoint 与 actor 发布；回放每局事务提交，记录 run ID、规则/输入/动作/目标版本及 worker 序号。恢复拒绝跨 run、缺数据和旧 WDL/18 通道状态。
 
 中国象棋规则和动作编码是论文没有给出的适配。用户已确认以中国象棋协会审定的《象棋竞赛规则（2020版）》为目标。当前 rule_version 仍明确标为开发版：已处理常见合法走法、将死/困毙优先级、三次重复中的长将和 120-ply 无吃子限着；**尚未完成国规的完整长捉、例外及特殊计数，不能把这些简化条款称作国规完整实现。** 暂不混用开发版数据与未来正式规则实验。
@@ -64,13 +64,13 @@ bash scripts/train.sh --config config/default.yaml \
   --resume "$HOME/alphazero-runs/paper-v3/learner.pt"
 ~~~
 
-默认不会静默自动恢复，也不会把不完整权重文件当完整训练状态。请给新实验使用独立输出目录。
+默认不会静默自动恢复，也不会把不完整权重文件当完整训练状态。下述运行参数调整直接在原目录续训；改变网络结构或规则版本仍需明确迁移或独立实验。
 
 若重建环境，运行 bash scripts/setup_wsl.sh。CUDA 安装方式依据 [PyTorch 官方版本页](https://pytorch.org/get-started/previous-versions/)；不要给 RTX 50 系列照搬旧文档的 cu118 命令。
 
 ## 浏览器训练实况
 
-当前训练目录：`AlphaZero/runs/xiangqi-rules-20261016`（本轮短时观测后保持停止）。在PowerShell可管理该run：
+训练目录统一读取 `config/local-train.yaml` 的 checkpoint_dir，目前为 `AlphaZero/runs/xiangqi-rules-ply300-20261020`。在PowerShell管理：
 
 ~~~powershell
 .\scripts\training.ps1 -Action Status
@@ -78,13 +78,23 @@ bash scripts/train.sh --config config/default.yaml \
 .\scripts\training.ps1 -Action Resume
 ~~~
 
-Status 显示实际进程和最近更新。Stop 只中断对应 run；Resume 保留完整回放并从 learner checkpoint 继续。训练日志位于该目录。新代码每 100 步写恢复状态，每 1000 步向自对弈发布模型，两者分别控制。
+Status显示实际进程和最近更新。Stop只中断对应run；Resume从learner恢复权重、SGD动量、累计步数和回放。恢复保存与模型发布分别控制，本机目前每100步保存恢复状态、每8000步发布。
 
-停止后，可以修改 `config/local-train.yaml` 中的 `num_simulations`（每手搜索次数，例如 800 改为 400），再执行 Resume。模型、SGD 动量、累计训练步数和已有回放继续保留；新启动的自对弈使用修改后的次数，尚未完成的旧对局不恢复。参数必须为正整数。
+### 直接调整参数，在同一目录续训
 
-`learner.pt` 保存最近恢复点的训练状态和配置，`config.json` 保存本次启动配置；`metrics.jsonl` 追加保存每次启动的完整配置、恢复步数与 `config_changes`（旧值/新值），不会用新配置覆盖历史记录。新生成棋谱的 trace 同样记录搜索次数。学习率、模型结构等其他续训限制保持原有检查。
+停止后修改YAML中的 num_simulations（搜索次数）、checkpoint_interval（发布间隔）、replay_window_positions（回放局面上限）、max_game_ply（双方合计强制和棋步数），再Resume即可，不需要新Git分支或新运行目录。也可以通过启动参数临时覆盖：
 
-该 run 目前使用 `config/local-train.yaml`：32盘独立对局分配到8个CPU工作进程，每盘仍顺序执行800次搜索。Resume默认沿用该配置；可用 `-Config config/default.yaml` 明确选择8盘配置。已保留1000、2000、3000步模型；它们仍是早期模型，独立评估尚未达到成熟棋力。
+~~~powershell
+.\scripts\training.ps1 -Action Resume -Simulations 400 -PublishEvery 8000 -ReplayPositions 100000 -MaxGamePly 300 -Publications 10 -Performance -RuntimeDiagnostics
+~~~
+
+上述命令从存档继续，到10次新发布后停止；启动时重导出现有模型不计数。发布仍按全局SGD步数的间隔边界进行；若剩余优化预算不足则拒绝启动。YAML修改会持久保留，命令行覆盖仅对本次启动生效，不会重写YAML。调整不会实时作用于正在运行的进程，需要Stop后Resume；尚未完成的旧对局不恢复。
+
+搜索次数、发布间隔和回放上限变化保留模型、SGD状态及兼容历史回放；缩小回放上限按整局移除旧局。改变max_game_ply还会自动校验棋谱、重建输入中的步数归一化：缩小时排除超过新上限的完整对局，扩大时排除旧上限强制判和的对局。保留的策略标签仍是历史搜索访问数，不会假称重新搜索。转换前在原目录保留 `.resume-backup-*` 文件，多文件替换中断可在下一次Resume回滚；run ID、训练步数和随机状态保持不变。备份会占空间，不会自动删除。网络结构和其他规则变化仍不允许直接混用数据。
+
+`learner.pt`保存最近恢复点的训练状态和配置，`config.json`保存本次启动配置；`metrics.jsonl`追加每次启动配置、恢复步数和config_changes（旧值/新值）。涉及步数上限的转换另写parameter-changes.jsonl，记录剔除和保留数量。参数记录体积很小，不会为每次改参数复制所有模型。新棋谱trace记录搜索次数；学习率等其他续训限制保持原检查。
+
+本机配置为32盘独立对局、8个CPU工作进程，每手400次搜索、整局上限300步、回放至多10万局面。Resume默认读取该配置。latest.pt为最近发布快照，learner.pt为最近恢复状态，正常训练覆盖这两个文件，不按每次发布无限归档。独立评估尚未证明成熟棋力。
 
 无需另启 FastAPI，训练进程自带只读页面：
 
