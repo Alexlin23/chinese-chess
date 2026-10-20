@@ -45,6 +45,8 @@ def pack_sample(state, policy, value, weight=1.0):
         raise ValueError("policy must be a finite normalized nonnegative vector")
     if weight != 1:
         raise ValueError("paper baseline uses uniform sampling without sample weights")
+    if np.any(policy[~state.legal_mask()] > 0):
+        raise ValueError("policy target contains illegal or off-board actions")
     value = np.asarray(value)
     if value.shape == (3,):  # Import helper, never a learned WDL training objective.
         value = value[0] - value[2]

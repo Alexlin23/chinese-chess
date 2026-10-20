@@ -30,7 +30,7 @@ replay_cache_mb: 256
 num_workers: 8
 inference_batch_size: 128
 inference_wait_ms: 2.0
-checkpoint_dir: AlphaZero/runs/paper-v3
+checkpoint_dir: AlphaZero/runs/policy-planes-v1
 max_iterations: 700
 seed: 20261015
 precision: bf16
@@ -40,5 +40,5 @@ inference_cuda_graph: true
 device: cuda
 torch_threads: 1
 telemetry_host: 127.0.0.1
-telemetry_port: 8765
+telemetry_port: 8768
 telemetry_interval: 0.25

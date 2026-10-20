@@ -66,8 +66,7 @@ class BatchRemoteEvaluator:
             raise RuntimeError("actor version changed inside an episode")
         self.pinned_step = self.model_step
         for i, state in enumerate(states):
-            if not state.turn:
-                response.policies[i] = response.policies[i, ::-1].copy()
+            response.policies[i] = state.absolute_policy(response.policies[i])
         return response.policies, response.values
 
 def selfplay_temperature(ply, num_sampling_moves=30):

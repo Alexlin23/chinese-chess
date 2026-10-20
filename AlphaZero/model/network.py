@@ -3,7 +3,7 @@ import numpy as np
 import torch
 from torch import nn
 from torch.nn import functional as F
-from ..engine.constants import POLICY_SIZE, INPUT_CHANNELS
+from ..engine.constants import POLICY_PLANES, INPUT_CHANNELS
 
 class ResBlock(nn.Module):
     def __init__(self, channels):
@@ -23,10 +23,14 @@ class PolicyValueNetwork(nn.Module):
         self.conv_input = nn.Conv2d(input_channels, num_filters, 3, padding=1, bias=False)
         self.bn_input = nn.BatchNorm2d(num_filters)
         self.resblocks = nn.Sequential(*(ResBlock(num_filters) for _ in range(num_blocks)))
-        # Flat policy is an alternative investigated in the authors' Methods.
-        self.policy_conv = nn.Conv2d(num_filters, 2, 1, bias=False)
-        self.policy_bn = nn.BatchNorm2d(2)
-        self.policy_fc = nn.Linear(2 * 90, POLICY_SIZE)
+        # AlphaZero chess/shogi spatial head, adapted to Xiangqi's 50 moves.
+        # Keep the hardware-sized tower width in the first 3x3 convolution.
+        # Final outputs are raw logits: no BN, ReLU or softmax after them.
+        self.policy_head = nn.Sequential(
+            nn.Conv2d(num_filters, num_filters, 3, padding=1, bias=False),
+            nn.BatchNorm2d(num_filters), nn.ReLU(),
+            nn.Conv2d(num_filters, POLICY_PLANES, 3, padding=1),
+        )
         self.value_conv = nn.Conv2d(num_filters, 1, 1, bias=False)
         self.value_bn = nn.BatchNorm2d(1)
         self.value_fc1 = nn.Linear(90, 256)
@@ -34,10 +38,10 @@ class PolicyValueNetwork(nn.Module):
 
     def forward(self, x):
         x = self.resblocks(F.relu(self.bn_input(self.conv_input(x))))
-        p = F.relu(self.policy_bn(self.policy_conv(x))).flatten(1)
+        p = self.policy_head(x).flatten(1)  # [N, 50, 10, 9] -> [N, 4500]
         v = F.relu(self.value_bn(self.value_conv(x))).flatten(1)
         v = torch.tanh(self.value_fc2(F.relu(self.value_fc1(v)))).squeeze(-1)
-        return self.policy_fc(p), v
+        return p, v
 
     def count_parameters(self):
         return sum(p.numel() for p in self.parameters())

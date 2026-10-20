@@ -5,12 +5,13 @@ import hashlib
 import json
 import math
 import yaml
-from ..engine.constants import NATURAL_LIMIT_ROUNDS, NATURAL_LIMIT_CHECK_CAP
+from ..engine.constants import NATURAL_LIMIT_ROUNDS, NATURAL_LIMIT_CHECK_CAP, POLICY_PLANES
 
 SCHEMA_VERSION = 3
 ALGORITHM_VERSION = "alphazero-datas1-aligned-v3"
 OBSERVATION_VERSION = "xiangqi-history8-131-v2"
-ACTION_VERSION = "absolute-from-to-8100-v1"
+ACTION_VERSION = "absolute-displacement-50x10x9-v1"
+POLICY_HEAD_VERSION = "conv3x3-bn-relu-conv3x3-v1"
 RULE_VERSION = "xiangqi-development-v3-natural-limit"  # CNXA 2020 check cap; chase remains incomplete.
 TARGET_VERSION = "scalar-mse-visits-v1"
 
@@ -46,7 +47,7 @@ class AlphaZeroConfig:
     actor_processes: int = 8
     inference_batch_size: int = 128
     inference_wait_ms: float = 2.0
-    checkpoint_dir: str = "AlphaZero/runs/paper-v3"
+    checkpoint_dir: str = "AlphaZero/runs/policy-planes-v1"
     max_iterations: int = 700
     seed: int = 20261015
     precision: str = "bf16"
@@ -56,7 +57,7 @@ class AlphaZeroConfig:
     device: str = "cuda"
     torch_threads: int = 1
     telemetry_host: str = "127.0.0.1"
-    telemetry_port: int = 8765
+    telemetry_port: int = 8768
     telemetry_interval: float = 0.25
 
     def __post_init__(self):
@@ -115,6 +116,7 @@ class AlphaZeroConfig:
         return dict(schema=SCHEMA_VERSION, algorithm=ALGORITHM_VERSION,
                     loss_reduction=self.loss_reduction, observation=OBSERVATION_VERSION,
                     action=ACTION_VERSION, rule=RULE_VERSION, target=TARGET_VERSION,
+                    policy_head=POLICY_HEAD_VERSION, policy_planes=POLICY_PLANES,
                     blocks=self.num_blocks, filters=self.num_filters,
                     channels=self.input_channels, max_game_ply=self.max_game_ply,
                     no_capture_plies=2 * NATURAL_LIMIT_ROUNDS,

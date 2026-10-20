@@ -11,7 +11,7 @@ max_game_ply: 64
 num_workers: 4
 actor_processes: 2
 inference_batch_size: 64
-checkpoint_dir: AlphaZero/runs/cuda-smoke
+checkpoint_dir: AlphaZero/runs/policy-cuda-smoke
 device: cuda
 precision: bf16
-telemetry_port: 8765
+telemetry_port: 8769

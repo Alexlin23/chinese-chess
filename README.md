@@ -2,6 +2,8 @@
 
 目标是在中国象棋上复现 AlphaZero 的学习与搜索方法，只缩减网络规模，并做硬件执行优化。**当前是重构中的开发版，还不能称为 100% 复现完成。** 主要缺口是完整中国象棋长捉责任裁定、独立规则验收及长期学习验证。唯一主审查与修复记录见 [ALPHAZERO_PAPER_REVIEW.md](ALPHAZERO_PAPER_REVIEW.md)，第 20 节记录收到 Data S1 后的核对与修正。
 
+本地 `alphazero_Policy` 分支将策略头改为两层卷积输出50个动作平面，完整说明及验证记录见主报告第25节。本分支和main中正在运行的8100输出模型具有不同规格，旧learner、actor和回放不可直接resume；当前main训练继续使用原模型。本分支尚未启动长期训练。
+
 ## 当前训练路径
 
 - 纯神经网络 MCTS 自我对弈；每手新建搜索树、逐次完成 800 次模拟，根 Dirichlet 噪声；前 30 ply 按访问数采样，之后选择访问数最多的动作，训练目标始终保留归一化访问数；没有启发式监督、吃子权重或 Arena 回滚。
@@ -10,11 +12,11 @@
 - 8 帧历史及重复特征，131 输入通道；当前玩家视角下同时变换棋盘与动作。
 - Policy CE + 标量 tanh value 的最终结果 MSE。完整 batch=4096；SGD momentum=0.9，初始 LR=0.2，100k/300k/500k 更新后各降 10 倍，总预算 700k 更新。
 - 已取得用户提供的官方 Data S1：正则项采用 c/2 × 参数平方和，SGD weight_decay=1e-4。**损失归一化仍有来源差异**：默认按局面取 batch 均值；Data S1 字面求和可用 loss_reduction: sum 核对，但完整 4096 batch、LR=0.2 的短检查出现非有限推理。详情、复现命令及失败证据见主报告第 20 节，不能称已完全复现原优化器。
-- 保留论文的 19 个残差块，通道缩为 128，约 725 万参数；完整 4096 batch 的 CUDA 实测预留峰值约 7.97GB。平铺 8100 动作头属于架构选择。BF16、channels-last、有界队列、跨对局合批。默认单树 batch=1、virtual_loss=0、reuse_tree=false；单树批量搜索和复用是可选实验，与默认参考搜索分开。
+- 19个残差块、128通道，策略头为3×3卷积→BN→ReLU→3×3卷积，直接输出50×10×9 logits，按平面、起点顺序展平为4500；全网5,993,269个参数。BF16、channels-last、有界队列、跨对局合批。默认单树batch=1、virtual_loss=0、reuse_tree=false；单树批量搜索和复用是可选实验。原8100头的CUDA显存与速度测量不代表本分支，新头尚未单独测量GPU峰值及速度。
 - 最近 100 万**完整对局**存入 SQLite，均匀抽局面；不将窗口偷偷缩为 100 万局面。SQLite 内存缓存默认 256MB，数据保存在磁盘，磁盘需求随对局长度增长。
 - 原子 learner checkpoint 与 actor 发布；回放每局事务提交，记录 run ID、规则/输入/动作/目标版本及 worker 序号。恢复拒绝跨 run、缺数据和旧 WDL/18 通道状态。
 
-中国象棋规则和动作编码是论文没有给出的适配。用户已确认以中国象棋协会审定的《象棋竞赛规则（2020版）》为目标。当前 rule_version 仍明确标为开发版：已处理常见合法走法、将死/困毙优先级、三次重复中的长将和 120-ply 无吃子限着；**尚未完成国规的完整长捉、例外及特殊计数，不能把这些简化条款称作国规完整实现。** 暂不混用开发版数据与未来正式规则实验。
+中国象棋规则和动作编码是论文没有给出的适配。用户已确认以中国象棋协会审定的《象棋竞赛规则（2020版）》为目标。当前rule_version仍明确标为开发版：已处理常见合法走法、将死/困毙优先级、三次重复中的单方长将及自然限着提出方将军10着上限。完整长捉、循环责任和例外仍未完成，不能称为完整国规；双方将军计数尚未各自增加独立观测平面。
 
 ## 在本机启动
 
@@ -23,24 +25,24 @@
 在项目目录的 PowerShell 中启动：
 
 ~~~powershell
-wsl --cd D:\project\Alphazero --exec bash scripts/train.sh --config config/default.yaml
+wsl --cd "$($PWD.Path)" --exec bash scripts/train.sh --config config/default.yaml
 ~~~
 
-训练运行时打开 [训练实况](http://localhost:8765)。这会运行完整默认预算；初次收集完整自对弈后开始优化。Ctrl+C 停止，保留最近一次完整 checkpoint 和已提交的对局。
+本分支默认监控端口为[8768](http://localhost:8768)，与main正在使用的8765区分。启动后初次收集完整自对弈再开始优化。Ctrl+C停止，保留最近一次完整checkpoint和已提交对局。不同端口不代表显存足够同时运行两个完整训练，本轮没有启动第二个GPU任务。
 
 建议把大型回放放在 WSL 的 Linux 文件系统。在 WSL 终端中：
 
 ~~~bash
-cd /mnt/d/project/Alphazero
-bash scripts/train.sh --config config/default.yaml --output-dir "$HOME/alphazero-runs/paper-v3"
+# 在alphazero_Policy工作树根目录执行。
+bash scripts/train.sh --config config/default.yaml --output-dir "$HOME/alphazero-runs/policy-planes-v1"
 ~~~
 
 恢复必须指向同一个 run 的 learner 和 replay：
 
 ~~~bash
 bash scripts/train.sh --config config/default.yaml \
-  --output-dir "$HOME/alphazero-runs/paper-v3" \
-  --resume "$HOME/alphazero-runs/paper-v3/learner.pt"
+  --output-dir "$HOME/alphazero-runs/policy-planes-v1" \
+  --resume "$HOME/alphazero-runs/policy-planes-v1/learner.pt"
 ~~~
 
 默认不会静默自动恢复，也不会把不完整权重文件当完整训练状态。请给新实验使用独立输出目录。
@@ -49,7 +51,7 @@ bash scripts/train.sh --config config/default.yaml \
 
 ## 浏览器训练实况
 
-当前持续训练目录：`AlphaZero/runs/xiangqi-v3-20261015`。在 PowerShell 可管理该 run：
+本分支本机配置使用新的 `AlphaZero/runs/xiangqi-policy-20261016`，与main现有训练目录隔离；本轮只完成临时目录检查，尚无该目录的长期训练。以后创建该运行后，可在本分支目录的PowerShell管理：
 
 ~~~powershell
 .\scripts\training.ps1 -Action Status
@@ -63,7 +65,7 @@ Status 显示实际进程和最近更新。Stop 只中断对应 run；Resume 保
 
 `learner.pt` 保存最近恢复点的训练状态和配置，`config.json` 保存本次启动配置；`metrics.jsonl` 追加保存每次启动的完整配置、恢复步数与 `config_changes`（旧值/新值），不会用新配置覆盖历史记录。新生成棋谱的 trace 同样记录搜索次数。学习率、模型结构等其他续训限制保持原有检查。
 
-该 run 目前使用 `config/local-train.yaml`：32盘独立对局分配到8个CPU工作进程，每盘仍顺序执行800次搜索。Resume默认沿用该配置；可用 `-Config config/default.yaml` 明确选择8盘配置。已保留1000、2000、3000步模型；它们仍是早期模型，独立评估尚未达到成熟棋力。
+`config/local-train.yaml` 配置32盘独立对局、8个CPU工作进程，每盘顺序执行800次搜索。Resume默认使用该配置；可用 `-Config config/default.yaml` 明确选择8盘配置。旧目录1000、2000、3000等快照使用旧策略头，不能在本分支直接加载。
 
 无需另启 FastAPI，训练进程自带只读页面：
 
@@ -74,7 +76,7 @@ Status 显示实际进程和最近更新。Stop 只中断对应 run；Resume 保
 - 观测事件可丢帧，训练对局和标签走独立可靠队列，完整局提交后才进入回放。
 - 监听默认仅本机。修改 telemetry_port 可同时观察不同 run；每个 run 使用不同端口和输出目录。
 
-旧 FastAPI 对战演示仍是独立功能；它的完整状态、请求版本与数据库事务问题尚未在本轮全部迁移。**新训练观战页不走旧对战接口，也不从演示棋局伪造训练画面。**
+旧FastAPI对战演示和独立PlaySession均通过完整GameState搜索；旧Web已加入服务端棋谱重放、事务和请求版本。训练观战页接收真实自对弈观测事件。
 
 ## 使用已训练模型下棋
 
@@ -82,7 +84,7 @@ Status 显示实际进程和最近更新。Stop 只中断对应 run；Resume 保
 
 ~~~bash
 $HOME/.venvs/xiangqi-alphazero/bin/python -m AlphaZero.scripts.play_server \
-  --checkpoint AlphaZero/runs/xiangqi-v3-20261015/latest.pt --simulations 800
+  --checkpoint AlphaZero/runs/xiangqi-policy-20261016/latest.pt --simulations 800
 ~~~
 
 打开 [与模型对弈](http://localhost:8767)，点击棋子及目标位置即可，可选择红黑方。默认对弈使用 CPU，不争用训练显存；可明确加 `--device cuda`，当前已运行的页面使用CUDA。每局固定一个快照；指向latest.pt时，新对局会载入最新已发布模型。用 `--fixed-snapshot` 可固定实验快照。第 0 步随机模型会被拒绝，不会伪装成已训练成果。
@@ -129,7 +131,7 @@ scripts                WSL 环境与启动脚本
 
 ## 规则状态统一分支
 
-`codex/rule-state-consistency` 先统一现有开发版规则状态；完整国规2020的长捉、循环责任和自然限着例外仍待实现。行动编码和模型架构沿用当前版本。
+本分支继承main中已合并的规则状态修正；完整国规2020的长捉、循环责任和自然限着例外仍待实现。策略头与行动编码的变更见下文。
 
 底层颜色统一通过 `AlphaZero.engine.player_id()` 转换：红方支持 `True/1/"r"`，黑方支持 `False/-1/"b"`，包括 NumPy 布尔和整数；其他输入明确报错。
 
@@ -153,4 +155,22 @@ scripts                WSL 环境与启动脚本
 python -m AlphaZero.scripts.migrate_natural_limit --source AlphaZero/runs/xiangqi-v3-20261015 --destination AlphaZero/runs/xiangqi-rules-20261016
 ~~~
 
-工具必须在旧训练停止后执行，目标目录必须尚不存在。此次已迁移81300步存档，145盘、18517局面全部保持相同终局；旧目录保留作为回退点。`scripts/training.ps1` 的默认Status/Stop/Resume现在对应 `xiangqi-rules-20261016`，旧目录可通过显式 `-RunName xiangqi-v3-20261015` 查询。
+上述迁移是main上同一旧策略头的历史记录：81300步存档、145盘及18517局面保持相同终局。自然限着迁移工具要求模型/动作规格相同，不负责将main的全连接头变成当前卷积头；本分支会拒绝此类跨架构来源。本分支管理脚本默认指向新的 `xiangqi-policy-20261016`，不会控制main正在运行的任务。
+
+### 50平面卷积策略头
+
+按照[AlphaZero Science论文的棋类卷积策略头](https://www.davidsilver.uk/wp-content/uploads/2020/03/alphazero-science_compressed.pdf)构建两层卷积，保留本机128通道的规模让步。论文未定义中国象棋；这里的50平面是本项目的中国象棋适配。
+
+| 平面索引 | 位移 `(行变化, 列变化)` | 数量 |
+|---|---|---|
+| 0—17 | 向上1—9格，再向下1—9格 | 18 |
+| 18—33 | 向左1—8格，再向右1—8格 | 16 |
+| 34—41 | `(-2,-1),(-2,1),(-1,-2),(-1,2),(1,-2),(1,2),(2,-1),(2,1)` | 8 |
+| 42—45 | `(-2,-2),(-2,2),(2,-2),(2,2)` | 4 |
+| 46—49 | `(-1,-1),(-1,1),(1,-1),(1,1)` | 4 |
+
+动作索引为 `平面×90 + 起点行×9 + 起点列`，与PyTorch逻辑NCHW展平一致。将帅、兵卒共用直线平面；车炮同位移共用编码，是否隔子、塞马腿、塞象眼、越河、出宫及将帅照面由规则引擎判定。4500个槽包含越界填充槽，合法掩码在推理softmax前排除，搜索只展开合法动作，回放拒绝非法目标；训练交叉熵仍使用完整4500 logits。
+
+黑方规范朝向将起点旋转180度，并将位移映射到反方向平面。该置换是自身的逆，输入规范化、神经推理输出还原、独立推理进程和回放标签使用同一映射；不能直接倒序4500个元素。
+
+新动作版本为 `absolute-displacement-50x10x9-v1`，配置指纹另含策略头结构与50平面信息，旧8100 checkpoint和回放明确不兼容。此次未实现旧塔/value的显式权重导入或旧回放重编码；不能从旧learner直接完整续训。参数量减少不等于已经实测训练加速，新头的GPU实测留待独立运行。

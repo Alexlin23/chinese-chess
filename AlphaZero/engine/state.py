@@ -128,11 +128,14 @@ class GameState:
         return self._legal_mask
 
     def canonical_mask(self):
-        mask = self.legal_mask()
-        return mask if self.turn else mask[::-1].copy()
+        return self.canonical_policy(self.legal_mask())
 
     def canonical_policy(self, policy):
-        return np.asarray(policy) if self.turn else np.asarray(policy)[::-1].copy()
+        return np.asarray(policy) if self.turn else ActionEncoder.rotate_policy(policy)
+
+    def absolute_policy(self, policy):
+        # A 180-degree permutation is its own inverse.
+        return self.canonical_policy(policy)
 
     def is_legal(self, move):
         return move in self.legal_moves()

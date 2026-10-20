@@ -85,27 +85,11 @@ def evaluate_agents(candidate: Agent, baseline: Agent, num_games: int,
 def checkpoint_agent(path: str, simulations: int = 64,
                      device: str = 'cpu') -> Agent:
     """Load a model only when a trained checkpoint is available."""
-    import torch
-    from ..model import PolicyWDLEncoder, NeuralEvaluator
-    from ..search import MCTS
-
-    checkpoint = torch.load(path, map_location=device, weights_only=False)
-    config = checkpoint.get('config', {})
-    model = PolicyWDLEncoder(
-        num_blocks=config.get('num_blocks', 4),
-        num_filters=config.get('num_filters', 64)).to(device)
-    model.load_state_dict(checkpoint['model_state_dict'])
-    model.eval()
-    search = MCTS(NeuralEvaluator(model, device),
-                  num_simulations=simulations,
-                  c_puct=config.get('c_puct', 1.25),
-                  pb_c_base=config.get('pb_c_base', 19652.0),
-                  batch_size=config.get('mcts_batch_size', 8),
-                  virtual_loss=config.get('virtual_loss', 3.0))
+    from ..model.player import ModelPlayer
+    player = ModelPlayer(path, device=device, simulations=simulations)
 
     def select(state, rng):
-        move, _ = search.select_move(
-            state, temperature=0.0, add_exploration_noise=False)
+        move, _ = player.choose(state)
         return move
 
     return select

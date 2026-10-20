@@ -7,8 +7,9 @@ COLS: int = 9
 BOARD_SIZE: int = ROWS * COLS          # 90
 
 # ── 动作空间 ──
-# action = from_square * 90 + to_square
-POLICY_SIZE: int = BOARD_SIZE * BOARD_SIZE  # 8100
+# Plane-major NCHW: action = displacement_plane * 90 + from_square.
+POLICY_PLANES: int = 50
+POLICY_SIZE: int = POLICY_PLANES * BOARD_SIZE  # 4500, including off-board padding.
 
 # ── 网络维度 ──
 INPUT_CHANNELS: int = 131  # 8 * (14 pieces + 2 repetitions) + 3 global planes

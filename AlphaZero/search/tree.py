@@ -64,8 +64,11 @@ class MCTS:
 
     @staticmethod
     def _attach(node, state, policy):
+        policy = np.asarray(policy, dtype=np.float64)
+        if policy.shape != (POLICY_SIZE,):
+            raise ValueError(f"neural policy must have shape ({POLICY_SIZE},)")
         actions = state.legal_actions()
-        probabilities = np.asarray(policy, dtype=np.float64)[actions]
+        probabilities = policy[actions]
         if not np.isfinite(probabilities).all() or np.any(probabilities < 0):
             raise FloatingPointError("invalid neural priors")
         total = probabilities.sum()

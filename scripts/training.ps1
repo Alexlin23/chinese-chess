@@ -1,6 +1,6 @@
 param(
     [ValidateSet('Status', 'Start', 'Resume', 'Stop')][string]$Action = 'Status',
-    [string]$RunName = 'xiangqi-rules-20261016',
+    [string]$RunName = 'xiangqi-policy-20261016',
     [string]$Config = 'config/local-train.yaml'
 )
 $ErrorActionPreference = 'Stop'
@@ -24,4 +24,4 @@ if ($Action -eq 'Resume') { $trainArguments += @('--resume', "$runRelative/learn
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $process = Start-Process -FilePath wsl.exe -ArgumentList $trainArguments -WindowStyle Hidden -RedirectStandardOutput "$runDirectory/training-$stamp.log" -RedirectStandardError "$runDirectory/training-$stamp.stderr.log" -PassThru
 $process.Id | Set-Content -LiteralPath "$runDirectory/windows-process.pid"
-Write-Output "Training process $($process.Id); dashboard: http://localhost:8765; output: $runDirectory"
+Write-Output "Training process $($process.Id); default dashboard: http://localhost:8768; output: $runDirectory"

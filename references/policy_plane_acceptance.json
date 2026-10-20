@@ -1,0 +1,66 @@
+{
+  "date": "2026-10-16",
+  "branch": "alphazero_Policy",
+  "base_commit": "ff23e9b1640fba998d4d9ba60a429b5f562e4a46",
+  "action_version": "absolute-displacement-50x10x9-v1",
+  "policy_head": "conv3x3-bn-relu-conv3x3-v1",
+  "local_config_fingerprint": "b21d7d4cac661c8621397d047d5c051fb5a4807853625a7d0f6c9e4c8d835d18",
+  "model": {
+    "blocks": 19,
+    "filters": 128,
+    "input_channels": 131,
+    "policy_shape": [50, 10, 9],
+    "flatten_order": "plane * 90 + from_row * 9 + from_col",
+    "parameters": 5993269,
+    "policy_parameters": 205362
+  },
+  "geometry": {
+    "coordinate_pairs_checked": 8100,
+    "action_slots_checked": 4500,
+    "on_board_geometry_slots": 2550,
+    "off_board_padding_slots": 1950,
+    "rotation_is_bijective_and_involutive": true
+  },
+  "tests": {
+    "passed": 131,
+    "skipped": 1,
+    "seconds": 49.01,
+    "skip_reason": "GPU hidden during CPU regression to preserve active main training resources",
+    "warnings": ["Starlette httpx TestClient deprecation"],
+    "extra_legacy_migration_boundary_check_passed": true
+  },
+  "real_cpu_pipeline": {
+    "blocks": 1,
+    "filters": 8,
+    "simulations_per_move": 800,
+    "workers": 2,
+    "actor_processes": 1,
+    "batch_size": 2,
+    "max_game_ply": 4,
+    "optimizer_steps": 2,
+    "completed_games_at_least": 1,
+    "trained_model_black_move_legal": true,
+    "benchmark_model_load_and_black_move_legal": true,
+    "purpose": "integration only, not playing strength"
+  },
+  "full_architecture_cpu_check": {
+    "device": "cpu",
+    "torch": "2.8.0+cu128",
+    "batch_size": 2,
+    "updates": 2,
+    "seconds": 0.3175803949998226,
+    "final_loss": 8.958807945251465,
+    "checkpoint_restore_equal": true,
+    "restored_step": 2
+  },
+  "new_run_directory": "AlphaZero/runs/xiangqi-policy-20261016",
+  "new_monitor_port": 8768,
+  "gpu_execution_checked": false,
+  "main_training_modified": false,
+  "limitations": [
+    "No new-head GPU latency or VRAM measurement; previous flat-head results do not transfer",
+    "No trained 8100-head checkpoint or old replay migration implemented",
+    "No long-run training or playing-strength evaluation for this architecture",
+    "Full CNXA adjudication and full rule observation planes remain incomplete"
+  ]
+}

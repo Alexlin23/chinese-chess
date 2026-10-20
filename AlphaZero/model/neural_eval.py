@@ -31,6 +31,5 @@ class NeuralEvaluator:
         with autocast_context(self.device, self.precision):
             policies, _, values = self.model.evaluate_batch(tensor, masks, forward_model=self.forward_model)
         for i, state in enumerate(states):
-            if not state.turn:
-                policies[i] = policies[i, ::-1].copy()
+            policies[i] = state.absolute_policy(policies[i])
         return policies, values

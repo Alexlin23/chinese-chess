@@ -9,6 +9,7 @@ from .config import AlphaZeroConfig
 from .trainer import create_model
 from ..model.neural_eval import autocast_context
 from ..model.cuda_graph import CudaGraphForward
+from ..engine.constants import POLICY_SIZE
 
 @dataclass
 class BatchRequest:
@@ -131,7 +132,7 @@ def _serve(path, config, requests, responses, ready, refresh, stop, run_id):
                     if (not 0 < n <= config.inference_batch_size
                             or item.worker_id not in responses
                             or item.states.shape != (n, config.input_channels, 10, 9)
-                            or item.masks.shape != (n, 8100)
+                            or item.masks.shape != (n, POLICY_SIZE)
                             or item.states.dtype != np.float32 or item.masks.dtype != np.bool_
                             or not np.isfinite(item.states).all()
                             or not item.masks.any(axis=1).all()):
