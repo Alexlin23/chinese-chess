@@ -4,12 +4,11 @@ import json
 import time
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
-from .inference_server import BatchRequest
+from .inference_server import BatchRequest, report_failure
 from .replay import pack_sample
 from ..engine import GameState
 from ..search import MCTS
 from .performance import Recorder
-from .runtime_diagnostics import report_failure
 
 
 def self_play_group_fn(worker_ids, config, request_queue, response_queues,

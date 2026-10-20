@@ -3,14 +3,26 @@ from dataclasses import dataclass
 from queue import Empty, Full
 import multiprocessing as mp
 import time
+import os
+import traceback
 import numpy as np
 import torch
-from .config import AlphaZeroConfig
 from .trainer import create_model
 from ..model.neural_eval import autocast_context
 from ..model.cuda_graph import CudaGraphForward
 from .performance import Recorder
-from .runtime_diagnostics import InferenceStatus, report_failure
+
+
+def report_failure(queue, source, exc, **details):
+    """Deliver an actual child-process exception to its supervising learner."""
+    if queue is None:
+        return
+    message = dict(source=source, pid=os.getpid(), error=repr(exc),
+                   traceback=traceback.format_exc(), **details)
+    try:
+        queue.put(message, timeout=1)
+    except Full:
+        print("Worker failure: " + str(message), flush=True)
 
 @dataclass
 class BatchRequest:
@@ -31,7 +43,7 @@ class BatchResponse:
 
 class InferenceServer:
     def __init__(self, model_path, config, context=None, run_id=None,
-                 performance_queue=None, performance_options=None, diagnostics=False):
+                 performance_queue=None, performance_options=None):
         self.config = config
         self.model_path = str(model_path)
         self.run_id = run_id
@@ -42,7 +54,6 @@ class InferenceServer:
         self.refresh_queue = self.context.Queue(maxsize=1)
         self.stop_event = self.context.Event()
         self.failures = self.context.Queue(maxsize=config.num_workers + 4)
-        self.diagnostics = InferenceStatus(self.context) if diagnostics else None
         self._process = None
         self.performance_queue, self.performance_options = performance_queue, performance_options
 
@@ -50,7 +61,7 @@ class InferenceServer:
         self._process = self.context.Process(target=_serve, args=(
             self.model_path, self.config, self.request_queue, self.response_queues,
             self.ready, self.refresh_queue, self.stop_event, self.run_id,
-            self.performance_queue, self.performance_options, self.failures, self.diagnostics), daemon=True)
+            self.performance_queue, self.performance_options, self.failures), daemon=True)
         self._process.start()
         try:
             status = self.ready.get(timeout=90)
@@ -80,27 +91,15 @@ class InferenceServer:
             queue.close()
 
 def _serve(path, config, requests, responses, ready, refresh, stop, run_id,
-           performance_queue=None, performance_options=None, failure_queue=None, diagnostics=None):
+           performance_queue=None, performance_options=None, failure_queue=None):
     torch.set_num_threads(config.torch_threads)
     performance = (Recorder("inference", performance_queue, **(performance_options or {}))
                    if performance_queue is not None else None)
     pending = None
     announced = False
-    def mark(stage, version=None, batch_size=None, memory_sample=None):
-        if diagnostics is not None:
-            previous, elapsed = diagnostics.mark(stage, version=version, batch_size=batch_size,
-                                                 versions=len(models), memory=memory_sample)
-            if performance is not None and previous in (
-                    "actor_read", "model_create", "weights_load", "graph_allocate", "graph_warmup", "graph_capture"):
-                performance.observe("inference.stage." + previous + "_wall", elapsed)
-    def memory():
-        if diagnostics is not None and config.device == "cuda":
-            return torch.cuda.memory_allocated(), torch.cuda.memory_reserved()
-        return None
     try:
         models, active_versions = {}, {}
         def load():
-            mark("actor_read")
             if performance is not None:
                 load_started = time.perf_counter()
             checkpoint = torch.load(path, map_location="cpu", weights_only=False)
@@ -110,22 +109,16 @@ def _serve(path, config, requests, responses, ready, refresh, stop, run_id,
                 raise ValueError("inference actor belongs to another run")
             version = int(checkpoint["step"])
             if version not in models:
-                mark("model_create", version)
                 model = create_model(config, config.device)
-                mark("weights_load", version)
                 model.load_state_dict(checkpoint["model_state_dict"])
                 model.eval()
                 if config.device == "cuda" and config.inference_cuda_graph:
                     models[version] = CudaGraphForward(model, config.precision,
-                        config.channels_last, config.inference_batch_size,
-                        stage_callback=(lambda stage, size, v=version: mark(stage, v, size))
-                        if diagnostics is not None else None)
+                        config.channels_last, config.inference_batch_size)
                 else:
                     models[version] = torch.compile(model) if config.compile_model else model
             if performance is not None:
                 performance.observe("data.actor_load_wall", time.perf_counter() - load_started)
-            if diagnostics is not None:
-                mark("idle", version=version, memory_sample=memory())
             return version
         step = load()
         ready.put(dict(step=step, device=config.device, precision=config.precision))
@@ -187,7 +180,6 @@ def _serve(path, config, requests, responses, ready, refresh, stop, run_id,
                     groups.setdefault(version, []).append(item)
                 outgoing = []
                 for version, group in groups.items():
-                    mark("prepare", version, sum(len(item.states) for item in group))
                     graph_cache = getattr(models[version], "cache", None)
                     real_batch = sum(len(item.states) for item in group)
                     executed_batch = (min(1 << (real_batch - 1).bit_length(), config.inference_batch_size)
@@ -211,15 +203,11 @@ def _serve(path, config, requests, responses, ready, refresh, stop, run_id,
                             gpu_sample.mark()
                         execution_started = time.perf_counter()
                     with torch.inference_mode(), autocast_context(config.device, config.precision):
-                        if diagnostics is not None:
-                            mark("forward", version=version, batch_size=real_batch,
-                                 memory_sample=memory() if cold_graph else None)
                         logits, values = models[version](array)
                         raw_finite = torch.isfinite(logits).all()
                         policy_tensor = logits.float().masked_fill(~masks, -torch.inf).softmax(1)
                         if performance is not None and gpu_sample is not None:
                             gpu_sample.mark()  # Existing .cpu() below completes events.
-                        mark("result_copy", version, real_batch)
                         policies = policy_tensor.cpu().numpy()
                         del policy_tensor
                         values = values.float().cpu().numpy()
@@ -238,18 +226,13 @@ def _serve(path, config, requests, responses, ready, refresh, stop, run_id,
                         if gpu_sample is not None:
                             gpu_sample.finish()
                     offset = 0
-                    mark("respond", version, real_batch)
                     for item in group:
                         n = len(item.states)
                         outgoing.append(BatchResponse(item.request_id, policies[offset:offset+n],
                             values[offset:offset+n], item.worker_id, version))
                         offset += n
-                    if diagnostics is not None and cold_graph:
-                        mark("respond", memory_sample=memory())
                 for response in outgoing:
                     responses[response.worker_id].put(response, timeout=5)
-                if diagnostics is not None:
-                    diagnostics.complete()
                 keep = set(active_versions.values()) | {step}
                 for expired in list(models):
                     if expired not in keep:
@@ -265,9 +248,7 @@ def _serve(path, config, requests, responses, ready, refresh, stop, run_id,
                         pass
                 raise
     except BaseException as exc:
-        report_failure(failure_queue, "inference", exc,
-                       inference=diagnostics.snapshot() if diagnostics is not None else None)
-        if diagnostics is not None: diagnostics.mark("failed")
+        report_failure(failure_queue, "inference", exc)
         if not announced:
             ready.put(dict(error=repr(exc)))
         stop.set()

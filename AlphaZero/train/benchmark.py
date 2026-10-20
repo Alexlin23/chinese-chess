@@ -1,6 +1,5 @@
 """Paired-color match runner for independent strength checks."""
 from dataclasses import dataclass
-import argparse
 from math import sqrt, log
 from typing import Callable
 import numpy as np
@@ -85,49 +84,11 @@ def evaluate_agents(candidate: Agent, baseline: Agent, num_games: int,
 def checkpoint_agent(path: str, simulations: int = 64,
                      device: str = 'cpu') -> Agent:
     """Load a model only when a trained checkpoint is available."""
-    import torch
-    from ..model import PolicyWDLEncoder, NeuralEvaluator
-    from ..search import MCTS
-
-    checkpoint = torch.load(path, map_location=device, weights_only=False)
-    config = checkpoint.get('config', {})
-    model = PolicyWDLEncoder(
-        num_blocks=config.get('num_blocks', 4),
-        num_filters=config.get('num_filters', 64)).to(device)
-    model.load_state_dict(checkpoint['model_state_dict'])
-    model.eval()
-    search = MCTS(NeuralEvaluator(model, device),
-                  num_simulations=simulations,
-                  c_puct=config.get('c_puct', 1.25),
-                  pb_c_base=config.get('pb_c_base', 19652.0),
-                  batch_size=config.get('mcts_batch_size', 8),
-                  virtual_loss=config.get('virtual_loss', 3.0))
+    from ..model.player import ModelPlayer
+    player = ModelPlayer(path, device, simulations)
 
     def select(state, rng):
-        move, _ = search.select_move(
-            state, temperature=0.0, add_exploration_noise=False)
+        move, _ = player.choose(state)
         return move
 
     return select
-
-
-def main():
-    parser = argparse.ArgumentParser(description="Paired-color strength benchmark")
-    parser.add_argument('--checkpoint', required=True)
-    parser.add_argument('--baseline', choices=('random', 'heuristic'),
-                        required=True)
-    parser.add_argument('--games', type=int, default=100)
-    parser.add_argument('--simulations', type=int, default=64)
-    parser.add_argument('--max-ply', type=int, default=512)
-    parser.add_argument('--seed', type=int, default=0)
-    parser.add_argument('--device', default='cpu')
-    args = parser.parse_args()
-    candidate = checkpoint_agent(args.checkpoint, args.simulations, args.device)
-    baseline = random_agent if args.baseline == 'random' else heuristic_agent
-    report = evaluate_agents(candidate, baseline, args.games,
-                             args.max_ply, args.seed)
-    print(report)
-
-
-if __name__ == '__main__':
-    main()

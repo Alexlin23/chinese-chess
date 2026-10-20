@@ -3,7 +3,6 @@ param(
     [string]$RunName,
     [string]$Config = 'config/local-train.yaml',
     [switch]$Performance,
-    [switch]$RuntimeDiagnostics,
     [int]$Simulations,
     [int]$PublishEvery,
     [int]$ReplayPositions,
@@ -44,7 +43,6 @@ $overrides = @{Simulations='--num-simulations'; PublishEvery='--checkpoint-inter
 foreach ($name in $overrides.Keys) {
     if ($PSBoundParameters.ContainsKey($name)) { $trainArguments += @($overrides[$name], [string]$PSBoundParameters[$name]) }
 }
-if ($RuntimeDiagnostics) { $trainArguments += '--runtime-diagnostics' }
 if ($Performance) { $trainArguments += '--performance' }
 else { $trainArguments += '--no-performance' }
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'

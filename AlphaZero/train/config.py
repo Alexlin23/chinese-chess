@@ -53,7 +53,7 @@ class AlphaZeroConfig:
     actor_processes: int = 8
     inference_batch_size: int = 128
     inference_wait_ms: float = 2.0
-    checkpoint_dir: str = "AlphaZero/runs/paper-v3"
+    checkpoint_dir: str = "AlphaZero/runs/training"
     max_iterations: int = 700
     seed: int = 20261015
     precision: str = "bf16"

@@ -58,16 +58,4 @@ class PolicyValueNetwork(nn.Module):
         values = values.float().cpu().numpy()
         if not np.isfinite(policies).all() or not np.isfinite(values).all():
             raise FloatingPointError("non-finite neural output")
-        # Middle return retained for old callers; it is NOT a learned WDL head.
-        return policies, None, values
-
-    def evaluate_state(self, state, legal_mask=None):
-        if state.ndim == 3:
-            state = state.unsqueeze(0)
-        if legal_mask is not None and legal_mask.ndim == 1:
-            legal_mask = legal_mask.unsqueeze(0)
-        policies, _, values = self.evaluate_batch(state, legal_mask)
-        return policies[0], None, float(values[0])
-
-# Import compatibility only. Old WDL checkpoints are intentionally incompatible.
-PolicyWDLEncoder = PolicyValueNetwork
+        return policies, values

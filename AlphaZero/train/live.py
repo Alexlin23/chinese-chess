@@ -117,8 +117,6 @@ class LiveTraining:
                     ram_gb=memory.used / 1024**3,
                     ram_total_gb=memory.total / 1024**3,
                     memory_scope="WSL" if "WSL_DISTRO_NAME" in os.environ else "系统",
-                    gpu_status="disabled",
-                    gpu_sample_error="GPU监控已禁用：训练期间不查询GPU",
                 )
             self.stop_event.wait(3)
 
