@@ -41,6 +41,8 @@ class AlphaZeroConfig:
     recovery_interval: int = 100  # Learner recovery only; does not publish actor weights.
     max_optimizer_steps: int = 700000
     replay_window_games: int = 1000000
+    replay_window_positions: int = 0  # Optional position cap; 0 uses the game window only.
+    mirror_augmentation: bool = False  # Learner-only random left/right reflection.
     replay_cache_mb: int = 256
     num_workers: int = 8
     actor_processes: int = 8
@@ -75,10 +77,15 @@ class AlphaZeroConfig:
                 raise ValueError(f"{key} must be a positive integer")
         if self.num_blocks < 1 or self.input_channels != 131:
             raise ValueError("this observation version requires 131 channels and positive blocks")
+        if (type(self.replay_window_positions) is not int or self.replay_window_positions < 0
+                or 0 < self.replay_window_positions < self.max_game_ply):
+            raise ValueError("replay_window_positions must be 0 or at least max_game_ply")
         if type(self.num_sampling_moves) is not int or self.num_sampling_moves < 0:
             raise ValueError("num_sampling_moves must be a nonnegative integer")
         if type(self.reuse_tree) is not bool:
             raise ValueError("reuse_tree must be boolean")
+        if type(self.mirror_augmentation) is not bool:
+            raise ValueError("mirror_augmentation must be boolean")
         if self.mcts_batch_size > self.inference_batch_size:
             raise ValueError("mcts batch cannot exceed inference batch")
         if self.loss_reduction not in ("mean", "sum"):

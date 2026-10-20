@@ -59,7 +59,10 @@ class Trainer:
             group["lr"] = lr
         if performance is not None:
             sample_started = time.perf_counter()
-        states, policies, values, _ = replay.sample(self.config.batch_size)
+        if self.config.mirror_augmentation:
+            states, policies, values, _ = replay.sample(self.config.batch_size, mirror_augmentation=True)
+        else:
+            states, policies, values, _ = replay.sample(self.config.batch_size)
         if performance is not None:
             performance.observe("sgd.sample_wall", time.perf_counter() - sample_started)
             transfer_started = time.perf_counter()
@@ -142,7 +145,12 @@ class Trainer:
                             self.config.channels_last).evaluate(GameState.new_game())
         finally:
             self.model.train(was_training)
-        atomic_torch_save(self.actor_payload(), path)
+        payload = self.actor_payload()
+        # Omit learner-only options from actor snapshots so
+        # already-running play servers can load newly published actor snapshots.
+        payload["config"].pop("replay_window_positions", None)
+        payload["config"].pop("mirror_augmentation", None)
+        atomic_torch_save(payload, path)
 
     def save_checkpoint(self, path=None, extra=None):
         payload = self.actor_payload()
@@ -167,21 +175,25 @@ class Trainer:
         for key in ("batch_size", "loss_reduction", "learning_rate", "lr_momentum", "weight_decay",
                     "lr_milestones", "lr_decay_rate", "c_puct", "pb_c_base",
                     "dirichlet_alpha", "dirichlet_epsilon", "mcts_batch_size", "virtual_loss",
-                    "replay_window_games", "seed", "checkpoint_interval", "num_sampling_moves", "reuse_tree"):
+                    "replay_window_games", "seed", "num_sampling_moves", "reuse_tree"):
             if state["config"].get(key) != self.config.to_dict().get(key):
                 raise ValueError(f"resume changes training semantics: {key}")
         self.model.load_state_dict(state["model_state_dict"], strict=True)
         self.optimizer.load_state_dict(state["optimizer_state_dict"])
         self.global_optimizer_step = state["step"]
         self.current_iteration = state["current_iteration"]
+        if state["config"].get("checkpoint_interval") != self.config.checkpoint_interval:
+            self.current_iteration = self.global_optimizer_step // self.config.checkpoint_interval
         random.setstate(state["python_rng_state"])
         np.random.set_state(state["numpy_rng_state"])
         torch.set_rng_state(state["torch_rng_state"].cpu())
         if str(self.device).startswith("cuda") and state.get("cuda_rng_states") is not None:
             torch.cuda.set_rng_state_all([s.cpu() for s in state["cuda_rng_states"]])
-        # Search budget changes affect future self-play, not checkpoint tensor
-        # compatibility. Keep the caller's config and record the transition.
+        # These learner/runtime choices may change without replacing model or SGD state.
+        # Keep the caller's config and log changes without resetting learner state.
         previous = json.loads(json.dumps(state["config"]))
+        previous.setdefault("replay_window_positions", 0)
+        previous.setdefault("mirror_augmentation", False)
         current = json.loads(json.dumps(self.config.to_dict()))
         self.resume_config_changes = {
             key: dict(old=previous.get(key), new=value)

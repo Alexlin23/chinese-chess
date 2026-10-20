@@ -2,6 +2,7 @@
 import argparse
 from contextlib import contextmanager
 import json
+import math
 import multiprocessing as mp
 from pathlib import Path
 from queue import Empty
@@ -19,6 +20,7 @@ from AlphaZero.train.inference_server import InferenceServer
 from AlphaZero.train.self_play_worker import self_play_group_fn
 from AlphaZero.train.live import LiveTraining
 from AlphaZero.train.performance import Recorder, Hub
+from AlphaZero.train.runtime_diagnostics import InferenceWatch
 
 @contextmanager
 def run_lock(directory):
@@ -44,9 +46,12 @@ def run_lock(directory):
 
 def pipeline(config, max_iterations=None, checkpoint=None, resume=None,
              output_dir=None, enable_monitor=True, performance=False,
-             performance_interval=5.0, performance_gpu_every=64):
+             performance_interval=5.0, performance_gpu_every=64,
+             runtime_diagnostics=False, inference_timeout=300):
     if performance_interval <= 0 or performance_gpu_every < 1:
         raise ValueError("performance interval and GPU sampling period must be positive")
+    if not math.isfinite(inference_timeout) or inference_timeout <= 0:
+        raise ValueError("inference timeout must be finite and positive")
     config.__post_init__()
     if checkpoint is not None:
         raise ValueError("legacy WDL/18-channel weights require explicit migration; fresh v3 run recommended")
@@ -55,9 +60,11 @@ def pipeline(config, max_iterations=None, checkpoint=None, resume=None,
     directory.mkdir(parents=True, exist_ok=True)
     with run_lock(directory):
         options = dict(interval=performance_interval, gpu_every=performance_gpu_every) if performance else None
-        return _pipeline(config, directory, max_iterations, resume, enable_monitor, options)
+        return _pipeline(config, directory, max_iterations, resume, enable_monitor, options,
+                         runtime_diagnostics, inference_timeout)
 
-def _pipeline(config, directory, max_iterations, resume, enable_monitor, performance_options=None):
+def _pipeline(config, directory, max_iterations, resume, enable_monitor, performance_options=None,
+              runtime_diagnostics=False, inference_timeout=300):
     performance = Recorder("learner", **performance_options) if performance_options is not None else None
     performance_hub = Hub(performance) if performance is not None else None
     def storage_call(name, function, *args):
@@ -84,19 +91,22 @@ def _pipeline(config, directory, max_iterations, resume, enable_monitor, perform
         recovery = trainer.load_checkpoint(resume)
     elif learner.exists():
         raise ValueError("learner.pt exists: use --resume explicitly or choose a new run directory")
-    replay = ReplayBuffer(directory / "replay.sqlite", config.replay_window_games, config.replay_cache_mb)
+    replay = ReplayBuffer(directory / "replay.sqlite", config.replay_window_games, config.replay_cache_mb,
+                          window_positions=config.replay_window_positions)
     try:
         replay.bind_spec(config.fingerprint)
         if resume and (recovery.get("replay_run_id") != replay.run_id
                        or recovery.get("replay_generation", -1) > replay.generation
                        or replay.max_actor_step > trainer.global_optimizer_step):
             raise ValueError("checkpoint/replay run or committed generation mismatch")
+        if not resume and replay.game_count:
+            raise ValueError("existing replay requires explicit resume; use a new directory for fresh training")
+        retention = replay.enforce_limits()
+        if retention["removed_positions"]:
+            print("Replay retention: " + json.dumps(retention), flush=True)
     except BaseException:
         replay.close()
         raise
-    if replay.game_count and not resume:
-        replay.close()
-        raise ValueError("existing replay requires explicit resume; use a new directory for fresh training")
     config_file = directory / "config.json.tmp"
     config_file.write_text(json.dumps(config.to_dict(), indent=2), encoding="utf-8")
     config_file.replace(directory / "config.json")
@@ -113,17 +123,37 @@ def _pipeline(config, directory, max_iterations, resume, enable_monitor, perform
     results = context.Queue(maxsize=config.num_workers * 2)
     events = context.Queue(maxsize=max(32, config.num_workers * 4))
     performance_queue = context.Queue(maxsize=max(64, config.num_workers * 2)) if performance else None
-    server = InferenceServer(actor, config, context, replay.run_id, performance_queue, performance_options)
+    server = InferenceServer(actor, config, context, replay.run_id, performance_queue, performance_options,
+                             diagnostics=runtime_diagnostics)
     processes = []
     live = None
     collector = None
     errors = []
+    runtime_failures = []
+    diagnostic_watch = None
     metrics = (directory / "metrics.jsonl").open("a", encoding="utf-8")
     session_id = uuid.uuid4().hex
     metrics.write(json.dumps(dict(event="session_start", session_id=session_id,
         step=trainer.global_optimizer_step, run_id=replay.run_id, resumed=bool(resume),
         config=config.to_dict(), config_changes=trainer.resume_config_changes)) + "\n")
     metrics.flush()
+    failure_log = (directory / "runtime-failures.jsonl").open("a", encoding="utf-8")
+    def drain_failures(wait=False):
+        for index in range(config.num_workers + 4):
+            try:
+                failure = (server.failures.get(timeout=.5) if wait and index == 0
+                           else server.failures.get_nowait())
+            except (Empty, ValueError, OSError):
+                break
+            failure.update(session_id=session_id, learner_step=trainer.global_optimizer_step)
+            if server.diagnostics is not None:
+                failure["inference_snapshot"] = server.diagnostics.snapshot()
+            runtime_failures.append(failure)
+            try:
+                failure_log.write(json.dumps(failure) + "\n")
+                failure_log.flush()
+            except OSError:
+                print("Runtime failure: " + json.dumps(failure), flush=True)
     performance_log = (directory / "performance.jsonl").open("a", encoding="utf-8") if performance else None
     last_performance = time.perf_counter() if performance else None
     def drain_performance():
@@ -146,8 +176,7 @@ def _pipeline(config, directory, max_iterations, resume, enable_monitor, perform
                       interval_seconds=performance_options["interval"],
                       gpu_sample_every=performance_options["gpu_every"])
         if live:
-            with live.lock:
-                report["hardware"] = dict(live.state["hardware"])
+            report["hardware"] = live.hardware_snapshot()
             live.update(performance=report)
         try:
             payload = json.dumps(report, allow_nan=False)
@@ -168,6 +197,10 @@ def _pipeline(config, directory, max_iterations, resume, enable_monitor, perform
                         actor_step=trainer.global_optimizer_step, step=trainer.global_optimizer_step,
                         positions=len(replay), completed_games=replay.generation, config=config.to_dict())
             live.update(performance=dict(enabled=performance is not None))
+        if server.diagnostics is not None:
+            diagnostic_watch = InferenceWatch(server.diagnostics, directory, live,
+                                              timeout=inference_timeout, session_id=session_id)
+            diagnostic_watch.start()
         ready = server.start()
         sequences = replay.next_sequences()
         process_count = min(config.actor_processes, config.num_workers)
@@ -179,7 +212,8 @@ def _pipeline(config, directory, max_iterations, resume, enable_monitor, perform
                 results, events, stop, sequences)
             if performance is not None:
                 worker_args += (performance_queue, performance_options)
-            process = context.Process(target=self_play_group_fn, args=worker_args, daemon=True)
+            process = context.Process(target=self_play_group_fn, args=worker_args,
+                kwargs=dict(failure_queue=server.failures, request_timeout=inference_timeout), daemon=True)
             process.start()
             processes.append(process)
         def collect():
@@ -214,10 +248,18 @@ def _pipeline(config, directory, max_iterations, resume, enable_monitor, perform
                             live.event(event)
                     drain_performance()
                     publish_performance()
+                    drain_failures()
                     failed = [(i,p.exitcode) for i,p in enumerate(processes)
                               if p.exitcode is not None]
-                    if not shutting_down.is_set() and (failed or not server._process.is_alive() or stop.is_set()):
-                        raise RuntimeError(f"actor/inference process failed: {failed}")
+                    if not shutting_down.is_set() and (runtime_failures or failed or not server._process.is_alive() or stop.is_set()):
+                        if not runtime_failures:
+                            drain_failures(wait=True)
+                        detail = (runtime_failures[0] if runtime_failures else dict(
+                            error="process exited or shared stop was set before a failure report arrived",
+                            actors=[dict(pid=p.pid, exitcode=p.exitcode) for p in processes],
+                            inference=dict(pid=server._process.pid, exitcode=server._process.exitcode),
+                            shared_stop=stop.is_set()))
+                        raise RuntimeError("actor/inference process failed: " + json.dumps(detail))
             except BaseException as exc:
                 errors.append(exc)
                 stop.set()
@@ -254,6 +296,9 @@ def _pipeline(config, directory, max_iterations, resume, enable_monitor, perform
             metrics.flush()
             if live:
                 live.update(**stats, positions=len(replay), completed_games=replay.generation)
+                if runtime_diagnostics and config.device == "cuda" and trainer.global_optimizer_step % 10 == 0:
+                    live.update(learner_gpu=dict(allocated_gb=torch.cuda.memory_allocated()/1024**3,
+                        reserved_gb=torch.cuda.memory_reserved()/1024**3, sampled_at=time.time()))
             step = trainer.global_optimizer_step
             if step % config.recovery_interval == 0 and step % config.checkpoint_interval != 0:
                 storage_call("data.checkpoint_wall", trainer.save_checkpoint, learner, replay.recovery_marker())
@@ -268,6 +313,7 @@ def _pipeline(config, directory, max_iterations, resume, enable_monitor, perform
                       f"games={replay.generation} positions={len(replay)} "
                       f"update={stats['seconds']:.3f}s", flush=True)
     except BaseException as exc:
+        drain_failures()
         if live and not isinstance(exc, KeyboardInterrupt):
             live.update(phase="failed", errors=[dict(error=repr(exc))])
         raise
@@ -282,6 +328,9 @@ def _pipeline(config, directory, max_iterations, resume, enable_monitor, perform
         collector_stop.set()
         if collector:
             collector.join(10)
+        drain_failures()
+        if diagnostic_watch:
+            diagnostic_watch.close()
         server.stop()
         drain_performance()
         publish_performance(force=True)
@@ -296,6 +345,7 @@ def _pipeline(config, directory, max_iterations, resume, enable_monitor, perform
         if live:
             live.close()
         metrics.close()
+        failure_log.close()
         replay.flush()
         replay.close()
     return dict(step=trainer.global_optimizer_step, games=replay.generation, positions=len(replay))
@@ -314,6 +364,10 @@ def main():
                         help="optional five-module performance accounting; checkpoint format unchanged")
     parser.add_argument("--performance-interval", type=float, default=5.0)
     parser.add_argument("--performance-gpu-every", type=int, default=64)
+    parser.add_argument("--runtime-diagnostics", action="store_true",
+                        help="record independent inference stage/allocator snapshots every five seconds")
+    parser.add_argument("--inference-timeout", type=float, default=300,
+                        help="bounded request wait in seconds; runtime only, not a model/search parameter")
     args = parser.parse_args()
     config = AlphaZeroConfig.from_yaml(args.config)
     if args.workers is not None:
@@ -326,7 +380,8 @@ def main():
     result = pipeline(config, args.max_iterations, resume=args.resume,
                       output_dir=args.output_dir, enable_monitor=not args.no_monitor,
                       performance=args.performance, performance_interval=args.performance_interval,
-                      performance_gpu_every=args.performance_gpu_every)
+                      performance_gpu_every=args.performance_gpu_every,
+                      runtime_diagnostics=args.runtime_diagnostics, inference_timeout=args.inference_timeout)
     print(json.dumps(result), flush=True)
 
 if __name__ == "__main__":

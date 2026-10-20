@@ -1,9 +1,8 @@
-"""Read-only HTTP/SSE observation server. Slow viewers never block actors."""
+﻿"""Read-only HTTP/SSE observation server. Slow viewers never block actors."""
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import json
 import os
-import subprocess
 import threading
 import time
 import psutil
@@ -100,24 +99,27 @@ class LiveTraining:
 
     def snapshot(self):
         with self.lock:
-            return json.loads(json.dumps(self.state, allow_nan=False))
+            result = json.loads(json.dumps(self.state, allow_nan=False))
+        result["hardware"] = self.hardware_snapshot()
+        return result
+
+    def hardware_snapshot(self):
+        with self.lock:
+            return dict(self.state.get("hardware", {}))
 
     def _hardware(self):
+        """Sample only host-safe CPU/RAM data; never query the GPU from WSL."""
         while not self.stop_event.is_set():
             memory = psutil.virtual_memory()
-            data = dict(cpu_percent=psutil.cpu_percent(), ram_gb=memory.used / 1024**3,
-                        ram_total_gb=memory.total / 1024**3,
-                        memory_scope="WSL" if "WSL_DISTRO_NAME" in os.environ else "系统")
-            try:
-                result = subprocess.run(["nvidia-smi",
-                    "--query-gpu=name,utilization.gpu,memory.used,memory.total",
-                    "--format=csv,noheader,nounits"], capture_output=True, text=True, timeout=2)
-                name, usage, used, total = [part.strip() for part in result.stdout.splitlines()[0].split(",")]
-                data.update(gpu=name, gpu_percent=float(usage),
-                            vram_gb=float(used)/1024, vram_total_gb=float(total)/1024)
-            except (OSError, ValueError, IndexError, subprocess.TimeoutExpired):
-                data["gpu"] = "unavailable"
-            self.update(hardware=data)
+            with self.lock:
+                self.state["hardware"].update(
+                    cpu_percent=psutil.cpu_percent(),
+                    ram_gb=memory.used / 1024**3,
+                    ram_total_gb=memory.total / 1024**3,
+                    memory_scope="WSL" if "WSL_DISTRO_NAME" in os.environ else "系统",
+                    gpu_status="disabled",
+                    gpu_sample_error="GPU监控已禁用：训练期间不查询GPU",
+                )
             self.stop_event.wait(3)
 
     def close(self):
