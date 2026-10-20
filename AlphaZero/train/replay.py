@@ -7,9 +7,15 @@ import threading
 import uuid
 import numpy as np
 from .config import OBSERVATION_VERSION, ACTION_VERSION, RULE_VERSION, TARGET_VERSION, ALGORITHM_VERSION
-from ..engine.constants import POLICY_SIZE
+from ..engine.constants import ROWS, COLS, POLICY_SIZE
 
 VERSION = "|".join((ALGORITHM_VERSION, OBSERVATION_VERSION, ACTION_VERSION, RULE_VERSION, TARGET_VERSION))
+
+# Reflect the origin and target columns of every absolute from/to action.
+# This permutation is its own inverse, including currently illegal actions.
+_MIRROR_ACTION_IDS = np.arange(POLICY_SIZE, dtype=np.uint16).reshape(
+    ROWS, COLS, ROWS, COLS)[:, ::-1, :, ::-1].reshape(-1)
+_MIRROR_ACTION_IDS.flags.writeable = False
 
 @dataclass
 class PackedSample:
@@ -188,15 +194,22 @@ class ReplayBuffer:
             self.total_positions = total_positions
         return True
 
-    def sample(self, n, rng=None):
+    def sample(self, n, rng=None, *, mirror_augmentation=False):
         if n < 1:
             raise ValueError("batch size must be positive")
+        if type(mirror_augmentation) is not bool:
+            raise ValueError("mirror_augmentation must be boolean")
         rng = rng if rng is not None else np.random
         with self.lock:
             if not self.count:
                 raise ValueError("replay is empty")
             ids = (rng.integers(self.low, self.high + 1, size=n) if hasattr(rng, "integers")
                    else rng.randint(self.low, self.high + 1, size=n))
+            # Uniformly sample the virtual originals-plus-mirrors pool.
+            # Disabled augmentation consumes no additional random numbers.
+            reflected = ((rng.integers(0, 2, size=n) if hasattr(rng, "integers")
+                          else rng.randint(0, 2, size=n)).astype(bool)
+                         if mirror_augmentation else None)
             unique = np.unique(ids)
             rows = {}
             for start in range(0, len(unique), 500):
@@ -213,9 +226,20 @@ class ReplayBuffer:
         for destinations in np.split(order, boundaries):
             planes, globals_, actions, probabilities, value = rows[int(ids[destinations[0]])]
             PackedSample(planes, globals_, actions, probabilities, value).validate()
-            states[destinations, :128] = np.unpackbits(np.frombuffer(planes, dtype=np.uint8)).reshape(128,10,9)
+            decoded = np.unpackbits(np.frombuffer(planes, dtype=np.uint8)).reshape(128,10,9)
+            actions = np.frombuffer(actions, dtype="<u2")
+            probabilities = np.frombuffer(probabilities, dtype="<f4")
+            if reflected is None:
+                states[destinations, :128] = decoded
+                policies[destinations[:,None], actions[None,:]] = probabilities
+            else:
+                normal_slots = destinations[~reflected[destinations]]
+                mirror_slots = destinations[reflected[destinations]]
+                states[normal_slots, :128] = decoded
+                states[mirror_slots, :128] = decoded[:, :, ::-1]
+                policies[normal_slots[:,None], actions[None,:]] = probabilities
+                policies[mirror_slots[:,None], _MIRROR_ACTION_IDS[actions][None,:]] = probabilities
             states[destinations, 128:] = np.frombuffer(globals_, dtype="<f4")[:,None,None]
-            policies[destinations[:,None], np.frombuffer(actions, dtype="<u2")[None,:]] = np.frombuffer(probabilities, dtype="<f4")
             values[destinations] = value
         return states, policies, values, np.ones(n, dtype=np.float32)
 

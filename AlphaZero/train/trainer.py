@@ -59,7 +59,10 @@ class Trainer:
             group["lr"] = lr
         if performance is not None:
             sample_started = time.perf_counter()
-        states, policies, values, _ = replay.sample(self.config.batch_size)
+        if self.config.mirror_augmentation:
+            states, policies, values, _ = replay.sample(self.config.batch_size, mirror_augmentation=True)
+        else:
+            states, policies, values, _ = replay.sample(self.config.batch_size)
         if performance is not None:
             performance.observe("sgd.sample_wall", time.perf_counter() - sample_started)
             transfer_started = time.perf_counter()
@@ -143,9 +146,10 @@ class Trainer:
         finally:
             self.model.train(was_training)
         payload = self.actor_payload()
-        # Replay retention belongs to the learner. Omit this optional new key so
+        # Retention and augmentation belong to the learner. Omit these keys so
         # already-running play servers can load newly published actor snapshots.
         payload["config"].pop("replay_window_positions", None)
+        payload["config"].pop("mirror_augmentation", None)
         atomic_torch_save(payload, path)
 
     def save_checkpoint(self, path=None, extra=None):
@@ -186,6 +190,7 @@ class Trainer:
         # Keep the caller's config and log changes without resetting learner state.
         previous = json.loads(json.dumps(state["config"]))
         previous.setdefault("replay_window_positions", 0)
+        previous.setdefault("mirror_augmentation", False)
         current = json.loads(json.dumps(self.config.to_dict()))
         self.resume_config_changes = {
             key: dict(old=previous.get(key), new=value)

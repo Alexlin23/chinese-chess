@@ -27,7 +27,8 @@ checkpoint_interval: 8000
 recovery_interval: 100
 max_optimizer_steps: 700000
 replay_window_games: 1000000
-replay_window_positions: 100000
+replay_window_positions: 50000
+mirror_augmentation: true
 replay_cache_mb: 256
 num_workers: 32
 inference_batch_size: 128
