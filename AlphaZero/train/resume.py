@@ -35,6 +35,13 @@ def _sidecars(directory):
         (directory / ("replay.sqlite" + suffix)).unlink(missing_ok=True)
 
 
+def _cleanup_adjustment(directory, record):
+    # Keep the journal until cleanup finishes so an interrupted cleanup can resume.
+    for name in _FILES:
+        (directory / (".resume-backup-" + record["id"] + "-" + name)).unlink(missing_ok=True)
+    (directory / ".resume-adjustment.json").unlink()
+
+
 def _finish(directory, record):
     audit = directory / "parameter-changes.jsonl"
     known = {json.loads(line)["id"] for line in audit.read_text().splitlines()} if audit.exists() else set()
@@ -43,7 +50,7 @@ def _finish(directory, record):
             stream.write(json.dumps(dict(record["report"], id=record["id"])) + "\n")
             stream.flush()
             os.fsync(stream.fileno())
-    (directory / ".resume-adjustment.json").unlink()
+    _cleanup_adjustment(directory, record)
 
 
 def recover_adjustment(directory):
@@ -58,6 +65,11 @@ def recover_adjustment(directory):
     if record["phase"] == "committed":
         _finish(directory, record)
         return
+    if record["phase"] == "rolled_back":
+        _cleanup_adjustment(directory, record)
+        return
+    if record["phase"] != "prepared":
+        raise ValueError("invalid resume adjustment phase")
     _sidecars(directory)
     for name in _FILES:
         target = directory / name
@@ -68,7 +80,9 @@ def recover_adjustment(directory):
             os.replace(temporary, target)
         else:
             target.unlink(missing_ok=True)
-    journal.unlink()
+    record["phase"] = "rolled_back"
+    _json_save(journal, record)
+    _cleanup_adjustment(directory, record)
 
 
 def _convert(directory, staging, payload, config, report):

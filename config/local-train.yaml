@@ -12,7 +12,7 @@ reuse_tree: false
 mcts_batch_size: 1
 virtual_loss: 0.0
 min_replay_games: 1
-max_game_ply: 300
+max_game_ply: 180
 batch_size: 4096
 loss_reduction: mean
 learning_rate: 0.2
