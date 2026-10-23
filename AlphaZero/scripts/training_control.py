@@ -18,6 +18,13 @@ def main():
             continue
         try:
             argv = (proc / "cmdline").read_bytes().decode().strip("\0").split("\0")
+            if "AlphaZero.scripts.pretrain_tactics" in argv:
+                # The open run lock identifies the actual directory even when
+                # defaults were used or the YAML has since been edited.
+                lock_path=directory / '.run.lock'
+                if any(fd.resolve()==lock_path for fd in (proc/'fd').iterdir()):
+                    matches.append(int(proc.name))
+                continue
             if "AlphaZero.scripts.pipeline" not in argv or "--output-dir" not in argv:
                 continue
             run_arg = argv[argv.index("--output-dir") + 1]

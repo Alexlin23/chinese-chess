@@ -1,4 +1,5 @@
-# User continuation: 8 games, 400 searches per move, publish after every SGD update.
+# Policy cold-start experiment. Offline pretraining has its own AdamW/epoch settings.
+# Future self-play (only on explicit Resume): 8 games, 400 searches, publish every SGD update.
 num_blocks: 19
 num_filters: 128
 input_channels: 131
@@ -14,10 +15,10 @@ mcts_batch_size: 1
 virtual_loss: 0.0
 min_replay_games: 1
 max_game_ply: 180
-batch_size: 4096
-new_positions_per_update: 4096
+batch_size: 256
+new_positions_per_update: 256
 loss_reduction: mean
-learning_rate: 0.2
+learning_rate: 0.002
 lr_momentum: 0.9
 lr_milestones:
 - 100000
@@ -35,7 +36,7 @@ replay_cache_mb: 256
 num_workers: 8
 inference_batch_size: 128
 inference_wait_ms: 2.0
-checkpoint_dir: AlphaZero/runs/xiangqi-policy-20261016
+checkpoint_dir: /mnt/d/project/Alphazero-data/policy-tactics/run
 max_iterations: 700000
 seed: 20261015
 precision: bf16

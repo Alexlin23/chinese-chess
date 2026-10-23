@@ -32,7 +32,7 @@ replay_cache_mb: 256
 num_workers: 8
 inference_batch_size: 128
 inference_wait_ms: 2.0
-checkpoint_dir: AlphaZero/runs/policy-planes-v1
+checkpoint_dir: AlphaZero/runs/training
 max_iterations: 700
 seed: 20261015
 precision: bf16
