@@ -1,0 +1,30 @@
+{
+  "scope": "CPU learner only, 19x128, batch2, ABBA, 12 updates per trial",
+  "results": [
+    {
+      "enabled": false,
+      "seconds_per_update": 0.08877006383333234,
+      "parameter_sha256": "51d7c049de716c2d8763c9469cf3dffca12ce98942ac76023f7ed1871df400d2"
+    },
+    {
+      "enabled": true,
+      "seconds_per_update": 0.0887677206666666,
+      "parameter_sha256": "51d7c049de716c2d8763c9469cf3dffca12ce98942ac76023f7ed1871df400d2"
+    },
+    {
+      "enabled": true,
+      "seconds_per_update": 0.08896738191666742,
+      "parameter_sha256": "51d7c049de716c2d8763c9469cf3dffca12ce98942ac76023f7ed1871df400d2"
+    },
+    {
+      "enabled": false,
+      "seconds_per_update": 0.08785022216666742,
+      "parameter_sha256": "51d7c049de716c2d8763c9469cf3dffca12ce98942ac76023f7ed1871df400d2"
+    }
+  ],
+  "off_seconds": 0.08831014299999988,
+  "on_seconds": 0.08886755129166701,
+  "relative_change_percent": 0.63119396337874,
+  "same_parameters": true,
+  "limitation": "Does not measure CUDA events, IPC, summary I/O or GPU throughput overhead"
+}

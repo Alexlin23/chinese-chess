@@ -3,10 +3,11 @@ from pathlib import Path
 import json
 import os
 import random
+import time
 import numpy as np
 import torch
 from torch.nn import functional as F
-from .config import AlphaZeroConfig
+from .config import AlphaZeroConfig, RESUME_FIXED_FIELDS
 from ..model.network import PolicyValueNetwork
 from ..model.neural_eval import autocast_context
 
@@ -43,16 +44,31 @@ class Trainer:
         self.optimizer = torch.optim.SGD(self.model.parameters(), lr=config.learning_rate,
                                          momentum=config.lr_momentum, weight_decay=config.weight_decay)
         self.global_optimizer_step = 0
+        self.optimizer_step_offset = 0  # Preserve monotonic model versions if the SGD schedule is rebased.
+        self.optimizer_step_changes = []
         self.current_iteration = 0
         self.resume_config_changes = {}
+        self.performance = None  # Runtime observer; never serialized in checkpoints/config.
 
     def step(self, replay):
+        performance = self.performance
+        if performance is not None:
+            step_started = time.perf_counter()
         self.model.train()
         decay = sum(self.global_optimizer_step >= milestone for milestone in self.config.lr_milestones)
         lr = self.config.learning_rate * self.config.lr_decay_rate ** decay
         for group in self.optimizer.param_groups:
             group["lr"] = lr
-        states, policies, values, _ = replay.sample(self.config.batch_size)
+        if performance is not None:
+            sample_started = time.perf_counter()
+        if self.config.mirror_augmentation:
+            states, policies, values, _ = replay.sample(self.config.batch_size, mirror_augmentation=True)
+        else:
+            states, policies, values, _ = replay.sample(self.config.batch_size)
+        if performance is not None:
+            performance.observe("sgd.sample_wall", time.perf_counter() - sample_started)
+            transfer_started = time.perf_counter()
+            gpu_sample = performance.cuda_sample(self.device, ("sgd.transfer_cuda", "sgd.compute_cuda"))
         def transfer(array):
             tensor = torch.from_numpy(array)
             if str(self.device).startswith("cuda"):
@@ -61,6 +77,11 @@ class Trainer:
         x, pi, z = transfer(states), transfer(policies), transfer(values)
         if str(self.device).startswith("cuda") and self.config.channels_last:
             x = x.contiguous(memory_format=torch.channels_last)
+        if performance is not None:
+            performance.observe("sgd.transfer_host_wall", time.perf_counter() - transfer_started)
+            if gpu_sample is not None:
+                gpu_sample.mark()
+            compute_started = time.perf_counter()
         self.optimizer.zero_grad(set_to_none=True)
         with autocast_context(self.device, self.config.precision):
             logits, v = self.forward_model(x)
@@ -82,14 +103,24 @@ class Trainer:
         self.optimizer.step()
         updated = list(self.model.parameters()) + list(self.model.buffers()) + [value for state in self.optimizer.state.values()
                     for value in state.values() if isinstance(value, torch.Tensor)]
-        if not bool(torch.stack([torch.isfinite(value).all() for value in updated]).all()):
+        updated_finite = torch.stack([torch.isfinite(value).all() for value in updated]).all()
+        if performance is not None and gpu_sample is not None:
+            gpu_sample.mark()  # Before the existing bool/D2H synchronization.
+        if not bool(updated_finite):
             raise FloatingPointError("non-finite parameters or optimizer state after SGD")
         self.global_optimizer_step += 1
-        return dict(step=self.global_optimizer_step, loss=float(loss.detach() + regularization),
+        stats = dict(step=self.global_optimizer_step, loss=float(loss.detach() + regularization),
                     data_loss=float(loss.detach()), data_loss_per_position=float(loss.detach()) / (self.config.batch_size if self.config.loss_reduction == "sum" else 1),
                     regularization=float(regularization),
                     policy_loss=float(policy_loss.detach()), value_loss=float(value_loss.detach()),
                     lr=lr, replay_positions=len(replay))
+        if performance is not None:
+            performance.observe("sgd.compute_wall", time.perf_counter() - compute_started)
+            performance.observe("sgd.update_wall", time.perf_counter() - step_started)
+            performance.increment("sgd.updates")
+            if gpu_sample is not None:
+                gpu_sample.finish()
+        return stats
 
     def train(self, replay, updates=None):
         stats = {}
@@ -98,10 +129,15 @@ class Trainer:
         self.current_iteration += 1
         return stats
 
+    @property
+    def model_step(self):
+        return self.global_optimizer_step + self.optimizer_step_offset
+
     def actor_payload(self):
         return dict(kind="actor", spec=self.config.spec, fingerprint=self.config.fingerprint,
                     run_id=getattr(self, "run_id", None),
                     config=self.config.to_dict(), step=self.global_optimizer_step,
+                    optimizer_step_offset=self.optimizer_step_offset,
                     model_state_dict={k:v.detach().cpu().clone() for k,v in self.model.state_dict().items()})
 
     def export_actor(self, path):
@@ -116,10 +152,22 @@ class Trainer:
                             self.config.channels_last).evaluate(GameState.new_game())
         finally:
             self.model.train(was_training)
-        atomic_torch_save(self.actor_payload(), path)
+        payload = self.actor_payload()
+        payload["step"] = self.model_step
+        payload.pop("optimizer_step_offset")
+        # Omit learner/self-play settings so already-running human-play servers
+        # can load newly published actor snapshots without new config fields.
+        payload["config"].pop("replay_window_positions", None)
+        payload["config"].pop("mirror_augmentation", None)
+        payload["config"].pop("search_noise_depth", None)
+        payload["config"].pop("new_positions_per_update", None)
+        atomic_torch_save(payload, path)
 
     def save_checkpoint(self, path=None, extra=None):
         payload = self.actor_payload()
+        extra = dict(extra or {})
+        if self.optimizer_step_changes:
+            extra["optimizer_step_changes"] = self.optimizer_step_changes
         payload.update(kind="learner", optimizer_type="SGD",
                        optimizer_state_dict=self.optimizer.state_dict(),
                        current_iteration=self.current_iteration,
@@ -127,7 +175,7 @@ class Trainer:
                        torch_rng_state=torch.get_rng_state(),
                        cuda_rng_states=[s.cpu() for s in torch.cuda.get_rng_state_all()]
                        if str(self.device).startswith("cuda") else None,
-                       extra=extra or {})
+                       extra=extra)
         path = path or self.config.checkpoint_path / "learner.pt"
         atomic_torch_save(payload, path)
         return str(path)
@@ -138,24 +186,31 @@ class Trainer:
             raise ValueError("not a versioned SGD learner checkpoint; use explicit weight import/migration")
         if state.get("fingerprint") != self.config.fingerprint:
             raise ValueError("checkpoint model/rule/observation/target specification mismatch")
-        for key in ("batch_size", "loss_reduction", "learning_rate", "lr_momentum", "weight_decay",
-                    "lr_milestones", "lr_decay_rate", "c_puct", "pb_c_base",
-                    "dirichlet_alpha", "dirichlet_epsilon", "mcts_batch_size", "virtual_loss",
-                    "replay_window_games", "seed", "checkpoint_interval", "num_sampling_moves", "reuse_tree"):
+        for key in RESUME_FIXED_FIELDS:
             if state["config"].get(key) != self.config.to_dict().get(key):
                 raise ValueError(f"resume changes training semantics: {key}")
         self.model.load_state_dict(state["model_state_dict"], strict=True)
         self.optimizer.load_state_dict(state["optimizer_state_dict"])
         self.global_optimizer_step = state["step"]
+        self.optimizer_step_offset = state.get("optimizer_step_offset", 0)
+        if type(self.optimizer_step_offset) is not int or self.optimizer_step_offset < 0:
+            raise ValueError("invalid optimizer step offset")
+        self.optimizer_step_changes = state.get("extra", {}).get("optimizer_step_changes", [])
         self.current_iteration = state["current_iteration"]
+        if state["config"].get("checkpoint_interval") != self.config.checkpoint_interval:
+            self.current_iteration = self.global_optimizer_step // self.config.checkpoint_interval
         random.setstate(state["python_rng_state"])
         np.random.set_state(state["numpy_rng_state"])
         torch.set_rng_state(state["torch_rng_state"].cpu())
         if str(self.device).startswith("cuda") and state.get("cuda_rng_states") is not None:
             torch.cuda.set_rng_state_all([s.cpu() for s in state["cuda_rng_states"]])
-        # Search budget changes affect future self-play, not checkpoint tensor
-        # compatibility. Keep the caller's config and record the transition.
+        # Search effort/noise depth, publication cadence and replay retention may change on resume.
+        # Keep the caller's config and log changes without resetting learner state.
         previous = json.loads(json.dumps(state["config"]))
+        previous.setdefault("replay_window_positions", 0)
+        previous.setdefault("mirror_augmentation", False)
+        previous.setdefault("search_noise_depth", 1)
+        previous.setdefault("new_positions_per_update", 0)
         current = json.loads(json.dumps(self.config.to_dict()))
         self.resume_config_changes = {
             key: dict(old=previous.get(key), new=value)

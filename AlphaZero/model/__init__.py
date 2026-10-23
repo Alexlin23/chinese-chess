@@ -1,3 +1,3 @@
 """Policy/value models."""
-from .network import PolicyValueNetwork, PolicyWDLEncoder, ResBlock
+from .network import PolicyValueNetwork, ResBlock
 from .neural_eval import NeuralEvaluator

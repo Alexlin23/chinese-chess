@@ -16,7 +16,5 @@ def __getattr__(name):
         return getattr(import_module('.inference_server', __name__), name)
     if name in ('BatchRemoteEvaluator', 'self_play_worker_fn'):
         return getattr(import_module('.self_play_worker', __name__), name)
-    if name in ('TrainingMonitor', 'monitor'):
-        return getattr(import_module('.monitor', __name__), name)
     raise AttributeError(name)
 

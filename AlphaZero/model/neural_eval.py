@@ -29,7 +29,7 @@ class NeuralEvaluator:
         if self.channels_last:
             tensor = tensor.contiguous(memory_format=torch.channels_last)
         with autocast_context(self.device, self.precision):
-            policies, _, values = self.model.evaluate_batch(tensor, masks, forward_model=self.forward_model)
+            policies, values = self.model.evaluate_batch(tensor, masks, forward_model=self.forward_model)
         for i, state in enumerate(states):
             policies[i] = state.absolute_policy(policies[i])
         return policies, values

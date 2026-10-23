@@ -1,6 +1,5 @@
 """Paired-color match runner for independent strength checks."""
 from dataclasses import dataclass
-import argparse
 from math import sqrt, log
 from typing import Callable
 import numpy as np
@@ -93,25 +92,3 @@ def checkpoint_agent(path: str, simulations: int = 64,
         return move
 
     return select
-
-
-def main():
-    parser = argparse.ArgumentParser(description="Paired-color strength benchmark")
-    parser.add_argument('--checkpoint', required=True)
-    parser.add_argument('--baseline', choices=('random', 'heuristic'),
-                        required=True)
-    parser.add_argument('--games', type=int, default=100)
-    parser.add_argument('--simulations', type=int, default=64)
-    parser.add_argument('--max-ply', type=int, default=512)
-    parser.add_argument('--seed', type=int, default=0)
-    parser.add_argument('--device', default='cpu')
-    args = parser.parse_args()
-    candidate = checkpoint_agent(args.checkpoint, args.simulations, args.device)
-    baseline = random_agent if args.baseline == 'random' else heuristic_agent
-    report = evaluate_agents(candidate, baseline, args.games,
-                             args.max_ply, args.seed)
-    print(report)
-
-
-if __name__ == '__main__':
-    main()

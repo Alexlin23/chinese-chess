@@ -136,7 +136,7 @@ def test_black_network_remote_inference_and_replay_share_the_same_action_transfo
             assert legal_masks.shape == (1, 4500) and legal_masks[0, canonical_action]
             policy = np.zeros((1, 4500), np.float32)
             policy[0, canonical_action] = 1
-            return policy, None, np.zeros(1, np.float32)
+            return policy, np.zeros(1, np.float32)
 
     policy, _ = NeuralEvaluator(FixedNetwork()).evaluate(state)
     assert policy.argmax() == absolute_action and state.legal_mask()[policy.argmax()]

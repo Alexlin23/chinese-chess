@@ -1,161 +1,120 @@
 # 中国象棋 AlphaZero
 
-目标是在中国象棋上复现 AlphaZero 的学习与搜索方法，只缩减网络规模，并做硬件执行优化。**当前是重构中的开发版，还不能称为 100% 复现完成。** 主要缺口是完整中国象棋长捉责任裁定、独立规则验收及长期学习验证。唯一主审查与修复记录见 [ALPHAZERO_PAPER_REVIEW.md](ALPHAZERO_PAPER_REVIEW.md)，第 20 节记录收到 Data S1 后的核对与修正。
+当前为 `alphazero_Policy` 分支：策略头输出50个动作平面（4500 logits）。已同步main的规则、镜像增强、按新增局面更新、SGD计数调整、性能区及人机噪声设置。模型和回放规格与main的8100头不同，不能直接混用其learner、actor或Replay。本分支配置继续使用原有独立目录 `AlphaZero/runs/xiangqi-policy-20261016` 和监控8768；完整实现说明见审查报告第42节。
 
-本地 `alphazero_Policy` 分支将策略头改为两层卷积输出50个动作平面，完整说明及验证记录见主报告第25节。本分支和main中正在运行的8100输出模型具有不同规格，旧learner、actor和回放不可直接resume；当前main训练继续使用原模型。本分支尚未启动长期训练。
+训练、搜索和浏览器对弈共用 `AlphaZero.engine.GameState`。当前是开发版：完整国规长捉责任、例外裁定及长期棋力验证尚未完成。唯一审查和历史测量记录见 [ALPHAZERO_PAPER_REVIEW.md](ALPHAZERO_PAPER_REVIEW.md)。
 
-## 当前训练路径
+## 统一配置与数据目录
 
-- 纯神经网络 MCTS 自我对弈；每手新建搜索树、逐次完成 800 次模拟，根 Dirichlet 噪声；前 30 ply 按访问数采样，之后选择访问数最多的动作，训练目标始终保留归一化访问数；没有启发式监督、吃子权重或 Arena 回滚。
-- 连续 SGD learner 与并行 actor 同时运行。每局固定一个已发布网络版本，双方使用同一版本；中心服务按版本合批，保存每手模型版本。
-- 按 Data S1 异步运行，不按固定对局数限制每次更新；每 1000 次更新发布网络。4400 万局是原国际象棋实验的数据量，不是伪代码规定的每步配额。默认 8 actor 与原实验 5000 actor 的数据生成速度不同，日志记录生成量和数据复用比；尚未证明同等学习效果。
-- 8 帧历史及重复特征，131 输入通道；当前玩家视角下同时变换棋盘与动作。
-- Policy CE + 标量 tanh value 的最终结果 MSE。完整 batch=4096；SGD momentum=0.9，初始 LR=0.2，100k/300k/500k 更新后各降 10 倍，总预算 700k 更新。
-- 已取得用户提供的官方 Data S1：正则项采用 c/2 × 参数平方和，SGD weight_decay=1e-4。**损失归一化仍有来源差异**：默认按局面取 batch 均值；Data S1 字面求和可用 loss_reduction: sum 核对，但完整 4096 batch、LR=0.2 的短检查出现非有限推理。详情、复现命令及失败证据见主报告第 20 节，不能称已完全复现原优化器。
-- 19个残差块、128通道，策略头为3×3卷积→BN→ReLU→3×3卷积，直接输出50×10×9 logits，按平面、起点顺序展平为4500；全网5,993,269个参数。BF16、channels-last、有界队列、跨对局合批。默认单树batch=1、virtual_loss=0、reuse_tree=false；单树批量搜索和复用是可选实验。原8100头的CUDA显存与速度测量不代表本分支，新头尚未单独测量GPU峰值及速度。
-- 最近 100 万**完整对局**存入 SQLite，均匀抽局面；不将窗口偷偷缩为 100 万局面。SQLite 内存缓存默认 256MB，数据保存在磁盘，磁盘需求随对局长度增长。
-- 原子 learner checkpoint 与 actor 发布；回放每局事务提交，记录 run ID、规则/输入/动作/目标版本及 worker 序号。恢复拒绝跨 run、缺数据和旧 WDL/18 通道状态。
+日常使用 `config/local-train.yaml`。它的 `checkpoint_dir` 是训练、对弈和评估共同使用的目录来源，不再在不同脚本里写死历史模型或数据路径。
 
-中国象棋规则和动作编码是论文没有给出的适配。用户已确认以中国象棋协会审定的《象棋竞赛规则（2020版）》为目标。当前rule_version仍明确标为开发版：已处理常见合法走法、将死/困毙优先级、三次重复中的单方长将及自然限着提出方将军10着上限。完整长捉、循环责任和例外仍未完成，不能称为完整国规；双方将军计数尚未各自增加独立观测平面。
+| 文件 | 用途 |
+|---|---|
+| learner.pt | 最近恢复点：模型、SGD动量、全局步数和随机状态 |
+| latest.pt | 最近发布给自博弈和人机对弈的模型 |
+| replay.sqlite | 最近的完整自博弈及训练局面 |
+| config.json / metrics.jsonl | 本次配置、训练指标和参数变化历史 |
+| performance.json / performance.jsonl | 仅开启性能计时时产生的汇总 |
 
-## 在本机启动
+正常训练覆盖learner和latest，不为每次发布无限归档。旧存档与棋谱文件不会因代码清理而删除，也不会被自动选中。需要使用其他实验时，显式选择配置或 `--run-dir` / `--checkpoint`。
 
-已在 WSL 的 /home/lin/.venvs/xiangqi-alphazero 建立独立环境：Python 3.10、PyTorch 2.8.0+cu128，实际识别 RTX 5070。不会使用系统 Python 的旧 CPU 环境。
+## 启动、暂停与续训
 
-在项目目录的 PowerShell 中启动：
+本机WSL环境：`/home/lin/.venvs/xiangqi-alphazero`。在项目根目录PowerShell中：
 
-~~~powershell
-wsl --cd "$($PWD.Path)" --exec bash scripts/train.sh --config config/default.yaml
-~~~
-
-本分支默认监控端口为[8768](http://localhost:8768)，与main正在使用的8765区分。启动后初次收集完整自对弈再开始优化。Ctrl+C停止，保留最近一次完整checkpoint和已提交对局。不同端口不代表显存足够同时运行两个完整训练，本轮没有启动第二个GPU任务。
-
-建议把大型回放放在 WSL 的 Linux 文件系统。在 WSL 终端中：
-
-~~~bash
-# 在alphazero_Policy工作树根目录执行。
-bash scripts/train.sh --config config/default.yaml --output-dir "$HOME/alphazero-runs/policy-planes-v1"
-~~~
-
-恢复必须指向同一个 run 的 learner 和 replay：
-
-~~~bash
-bash scripts/train.sh --config config/default.yaml \
-  --output-dir "$HOME/alphazero-runs/policy-planes-v1" \
-  --resume "$HOME/alphazero-runs/policy-planes-v1/learner.pt"
-~~~
-
-默认不会静默自动恢复，也不会把不完整权重文件当完整训练状态。请给新实验使用独立输出目录。
-
-若重建环境，运行 bash scripts/setup_wsl.sh。CUDA 安装方式依据 [PyTorch 官方版本页](https://pytorch.org/get-started/previous-versions/)；不要给 RTX 50 系列照搬旧文档的 cu118 命令。
-
-## 浏览器训练实况
-
-本分支本机配置使用新的 `AlphaZero/runs/xiangqi-policy-20261016`，与main现有训练目录隔离；本轮只完成临时目录检查，尚无该目录的长期训练。以后创建该运行后，可在本分支目录的PowerShell管理：
-
-~~~powershell
+```powershell
 .\scripts\training.ps1 -Action Status
 .\scripts\training.ps1 -Action Stop
 .\scripts\training.ps1 -Action Resume
-~~~
+```
 
-Status 显示实际进程和最近更新。Stop 只中断对应 run；Resume 保留完整回放并从 learner checkpoint 继续。训练日志位于该目录。新代码每 100 步写恢复状态，每 1000 步向自对弈发布模型，两者分别控制。
+首次空目录使用Start；已有learner必须使用Resume。Stop只中断对应训练进程，不停止人机对弈服务。恢复使用最近一次完整保存的learner；停止前尚未保存的尾部更新不会保留。
 
-停止后，可以修改 `config/local-train.yaml` 中的 `num_simulations`（每手搜索次数，例如 800 改为 400），再执行 Resume。模型、SGD 动量、累计训练步数和已有回放继续保留；新启动的自对弈使用修改后的次数，尚未完成的旧对局不恢复。参数必须为正整数。
+停止后直接修改配置，再Resume，不需要新Git分支或新运行目录。也可临时覆盖参数：
 
-`learner.pt` 保存最近恢复点的训练状态和配置，`config.json` 保存本次启动配置；`metrics.jsonl` 追加保存每次启动的完整配置、恢复步数与 `config_changes`（旧值/新值），不会用新配置覆盖历史记录。新生成棋谱的 trace 同样记录搜索次数。学习率、模型结构等其他续训限制保持原有检查。
+```powershell
+    .\scripts\training.ps1 -Action Resume -Simulations 400 -PublishEvery 4000 -ReplayPositions 50000 -MaxGamePly 180 -NoiseDepth 3 -Publications 10
+```
 
-`config/local-train.yaml` 配置32盘独立对局、8个CPU工作进程，每盘顺序执行800次搜索。Resume默认使用该配置；可用 `-Config config/default.yaml` 明确选择8盘配置。旧目录1000、2000、3000等快照使用旧策略头，不能在本分支直接加载。
+| 参数 / YAML字段 | 含义 |
+|---|---|
+| Simulations / num_simulations | 每手MCTS模拟次数 |
+| PublishEvery / checkpoint_interval | 每多少次SGD更新发布模型 |
+| ReplayPositions / replay_window_positions | 保留的最近局面上限，按整局淘汰；0表示只使用对局数窗口 |
+| mirror_augmentation（YAML开关） | 训练取样时随机左右镜像，默认关闭，本机配置开启 |
+| MaxGamePly / max_game_ply | 双方合计的强制和棋步数上限 |
+| NoiseDepth / search_noise_depth | 自博弈搜索中加噪声的决策层数，包含根节点；0关闭，1为论文基线 |
+| NewPositionsPerUpdate / new_positions_per_update | 每新增多少原始局面允许一次SGD更新；0表示原来的连续更新 |
+| Publications | 本次继续完成多少次新发布后停止；启动重导出不计数 |
 
-无需另启 FastAPI，训练进程自带只读页面：
+YAML修改持久有效，命令行覆盖只影响本次启动。运行中的参数不热改。发布按全局SGD步数的间隔边界触发；剩余更新预算不足时拒绝启动。
 
-- 活跃对局自动增加/移除卡片，**有几盘同时下就显示几盘**，没有固定棋盘数量和分页上限。
-- 每盘显示棋盘、行棋方、手数、耗时、模型版本及搜索次数。
-- 总览显示完成局数、回放局面数、优化步、策略/价值损失及 CPU/GPU/显存/内存。
-- 页面自动重连；窗口大小和棋盘密度自适应。通过 SSE 发送最新观测，慢客户端不阻塞训练。
-- 观测事件可丢帧，训练对局和标签走独立可靠队列，完整局提交后才进入回放。
-- 监听默认仅本机。修改 telemetry_port 可同时观察不同 run；每个 run 使用不同端口和输出目录。
+搜索次数、发布间隔和回放上限调整保留模型、SGD动量、步数、随机状态及兼容回放。改变强制和棋上限时自动校验棋谱、重建输入的步数归一化：缩小时从数据库删除超过新上限的整局，扩大时删除旧上限强制判和的整局。历史策略标签仍是当时的访问数，不会重新搜索。转换仅在执行期间保留同目录的临时回滚文件，成功提交或完成回滚后自动删除；转换记录保留在 `parameter-changes.jsonl`，不长期备份被淘汰的棋局。网络结构或规则版本不兼容时仍拒绝直接混用。
 
-旧FastAPI对战演示和独立PlaySession均通过完整GameState搜索；旧Web已加入服务端棋谱重放、事务和请求版本。训练观战页接收真实自对弈观测事件。
+`search_noise_depth: 3` 在每次自博弈搜索的根节点、走完一手后的节点、走完两手后的节点混入Dirichlet噪声，之后的层不加。每个已展开节点在一次搜索内只混入一次噪声，不随访问次数叠加；复用子树时从原网络先验重新混合。它指搜索树的前三层，不是整盘棋开头三手。alpha=0.3、epsilon=0.25及前30手温度采样保持独立。此项是用户指定的实验扩展，论文参考配置仍设为1。旧存档缺少该字段时按1恢复，改变层数会记录在续训配置变化中；不清空Replay或重置SGD步数、动量和学习率。人机对弈默认关闭噪声；通过服务参数显式开启时，可共用此层数设置。
 
-## 使用已训练模型下棋
+### 左右镜像增强
 
-新的对弈入口直接使用完整规则状态和本轮标量模型，不依赖旧对战接口。在 WSL 项目目录运行：
+本机配置为 `replay_window_positions: 50000`、`mirror_augmentation: true`。回放只保存最近至多5万个原始局面，按完整对局淘汰；每个SGD样本以50%概率选择原局面或左右镜像，相当于从至多“5万原局面＋5万镜像”的虚拟池取样。对称局面可能与自身相同，因此不是10万个独立原始局面。
 
-~~~bash
-$HOME/.venvs/xiangqi-alphazero/bin/python -m AlphaZero.scripts.play_server \
-  --checkpoint AlphaZero/runs/xiangqi-policy-20261016/latest.pt --simulations 800
-~~~
+镜像同时反射8帧历史和策略动作的起点、终点列，胜负价值及全局状态特征不变。每次SGD仍抽4096项，不强制原图和镜像成对，不增加数据库副本。它是中国象棋训练扩展；关闭开关不额外消耗随机数。启用后的抽样随机状态由现有NumPy存档恢复。
 
-打开 [与模型对弈](http://localhost:8767)，点击棋子及目标位置即可，可选择红黑方。默认对弈使用 CPU，不争用训练显存；可明确加 `--device cuda`，当前已运行的页面使用CUDA。每局固定一个快照；指向latest.pt时，新对局会载入最新已发布模型。用 `--fixed-snapshot` 可固定实验快照。第 0 步随机模型会被拒绝，不会伪装成已训练成果。
+已有相同模型/规则的learner可以在原目录续训，参数变化记录到config_changes。新回放上限在下一次Resume时生效，合并代码本身不裁剪现有数据或启动训练。actor发布省略learner专用开关，保持现有对弈服务可读取。
 
-独立评估示例：
+### 按新增数据触发更新
 
-~~~bash
-$HOME/.venvs/xiangqi-alphazero/bin/python -m AlphaZero.scripts.evaluate_model \
-  --checkpoint AlphaZero/runs/xiangqi-v3-20261015/latest.pt \
-  --output AlphaZero/runs/xiangqi-v3-20261015/evaluation-random.json \
-  --baseline random --games 8 --simulations 64
-~~~
+本机配置为 `new_positions_per_update: 4096`：每入库4096个新的原始自博弈局面，允许一次SGD更新，每次仍从整个当前Replay随机抽4096项并按开关做镜像。并非只训练刚产生的4096项，也不保证每个局面恰好抽中一次。完整对局入库时累计新增量，镜像、重复提交和抽样不增加计数；FIFO淘汰旧局面不会扣减累计量。
 
-评估记录载入的确切更新步数、红黑胜负、和棋与逐局结果。64 次搜索只用于这项短评估，不改变训练的 800 次搜索。少量对随机走法的结果不能作为强棋力或完整国规认证。
+首次启用或改变此间隔，从本次启动时的累计入库数开始计算，既有Replay不授予更新额度。间隔不变时，剩余额度随learner的 `extra.update_schedule` 保存；Resume保留余数，也计入检查点之后已提交的对局。未保存的SGD尾部会同模型一起回退。该字段兼容缺少此元数据的旧learner，不改变模型结构、动作标签或Replay格式；actor不携带此训练参数。设为0恢复连续SGD。
 
-## 规模与检查
+新增数据不足时继续自博弈，learner等待。发布间隔独立配置；本机暂设 `checkpoint_interval: 1`，即每次SGD更新后保存并发布，对应每新增4096个原始局面发布一次。若改为4000更新/发布，则对应16384000个新增局面/发布。`max_optimizer_steps: 700000`仍是SGD预算；调整发布间隔时，`max_iterations * checkpoint_interval`也必须覆盖该预算。本次频率限制是本机实验配置，论文参考配置仍使用0。
 
-config/default.yaml 是目标训练参数；config/test.yaml 与 config/cuda-smoke.yaml **仅用于短链路检查**，缩减搜索/批大小的结果不能算论文基线或棋力成果。
+停止训练后，可在原目录调整SGD日程计数，例如 `wsl --cd . --exec /home/lin/.venvs/xiangqi-alphazero/bin/python -m AlphaZero.scripts.reset_optimizer_step --step 400000`。该操作保留模型权重、SGD动量、RNG、数据和发布快照，只调整learner的日程计数、对应学习率与迭代数，变更记录在learner中。发布模型的版本通过存档内的偏移量保持递增，历史棋谱版本不改写；例如SGD从700000调到400000，模型版本仍为700000，再更新4000次后为704000。学习率和停止预算按调整后的SGD计数计算，因此40万步对应本机现有日程0.002，到50万步后再降至0.0002。此操作不会启动训练，也不会重置运行中的人机对局。
 
-~~~bash
-bash scripts/train.sh --config config/test.yaml --output-dir /tmp/az-cpu-check
-bash scripts/train.sh --config config/cuda-smoke.yaml --output-dir /tmp/az-cuda-check
-$HOME/.venvs/xiangqi-alphazero/bin/python -m AlphaZero.scripts.runtime_check --config config/default.yaml
-~~~
+## 浏览器
 
-本次实际完成：CPU 端到端；CUDA 并发自对弈与 100 步小预算训练；默认 800 搜索、8 actor、4096 batch 的短闭环；默认 batch 的 CUDA checkpoint 恢复；浏览器实时多盘检查。上述为早期验收；Data S1 修正后的新增检查与边界在主报告第 20 节。新 run 默认位于 AlphaZero/runs/paper-v3，拒绝混用旧算法数据。
+- [8768训练观战](http://localhost:8768)：训练进程提供，有多少盘同时下就显示多少盘。显示训练进度、损失、CPU和内存，保留原有样式；训练停止后服务随之关闭。
+- [8770动作平面对弈](http://localhost:8770)：独立运行，训练暂停后仍能下棋。每局固定模型快照，开始新局时检查最新发布模型。
 
-compile_model 默认关闭；开启前应在本机对比编译开销与稳态吞吐。GPU 利用率不是正确性或棋力证据，扩大 worker 数前应观察 CPU、排队和实际合批分布。WSL 当前可见约 15.2GB 内存，是主机 32GB 的默认分配附近值；本轮未改 WSL 系统资源限制。
+启动人机对弈，默认读取同一份本机配置及其latest.pt：
 
-## 目录
+```powershell
+wsl --cd . --exec /home/lin/.venvs/xiangqi-alphazero/bin/python -m AlphaZero.scripts.play_server --device cuda --port 8770
+```
 
-~~~text
-AlphaZero/engine       规则状态与观测编码（完整国规仍待完成）
-AlphaZero/model        Policy/value 网络及坐标映射
-AlphaZero/search       参考串行 PUCT；可选批量/复用实验
-AlphaZero/train        learner、actor、磁盘回放、推理与只读观测
-AlphaZero/scripts      训练与本机硬件检查入口
-frontend/training.*    实时训练观战页面
-config                 目标配置与明确隔离的冒烟配置
-scripts                WSL 环境与启动脚本
-~~~
+默认CPU；明确指定 `--device cuda` 才使用GPU。可用 `--config` 选择其他配置，`--simulations` 临时覆盖搜索次数，`--fixed-snapshot` 禁止新局重载。没有旧版独立Web后端或第二套规则数据库。
 
-修复进展统一维护在主审查文档；仓库原有 CODE_REVIEW/PLAN 等是历史材料，不能作为新训练路径已经验收的证明。
+人机对弈默认关闭探索噪声；启动加上 `--exploration-noise` 开启，`--search-noise-depth` 控制搜索树加噪层数，未指定时使用本机配置（当前3层）。α和混合比例取模型配置（当前0.3和0.25）。开启后，新对局重载模型仍保留这些服务参数；选棋温度仍为0，按搜索访问数最大者落子，噪声不保证每次都会走不同的棋。
 
-## 规则状态统一分支
+## 可关闭的性能计时
 
-本分支继承main中已合并的规则状态修正；完整国规2020的长捉、循环责任和自然限着例外仍待实现。策略头与行动编码的变更见下文。
+保留此前要求的五模块粗粒度性能区，不包含推理阶段、内存池、停顿诊断或GPU管理查询。
 
-底层颜色统一通过 `AlphaZero.engine.player_id()` 转换：红方支持 `True/1/"r"`，黑方支持 `False/-1/"b"`，包括 NumPy 布尔和整数；其他输入明确报错。
+```powershell
+.\scripts\training.ps1 -Action Resume -Performance
+```
 
-旧 FastAPI Web 接口现在从服务端保存的起始局面和完整棋谱恢复 `GameState`，与训练及搜索使用同一状态转换、编码和终局逻辑。走棋、悔棋在单个数据库事务内完成；`revision` 在走棋和悔棋后均递增。数据库兼容添加起始局面和版本字段；旧棋谱仅在完整重放后与保存棋盘一致时恢复，不能补造缺失历史。每次读取重放完整棋谱，以正确性为先，后续可用版本化缓存优化。
+不传Performance则关闭。默认每5秒汇总、每64批/更新抽样CUDA Event，复用已有同步点，不逐模拟写日志。MCTS本地时间为整手墙钟减同步神经调用的估算；请求RTT包括推理、排队和进程通信。并发模块时间不能直接相加，近似P95不能冒充精确分位数。
 
-接口有明确兼容变化：`/api/valid-moves`、`/api/move`、`/api/check-win`、`/api/ai-move`、`/api/heuristic-move` 均要求 `game_id`、`revision`、`board`、`turn`。客户端须先创建或获取对局，再携带返回的版本号。旧的只传棋盘调用返回422，棋盘或版本过期返回409；不会静默清空历史。悔棋请求体为 `{"revision": 当前版本号}`。前端 `chess.js` 已同步修改，须和后端一起部署。
+保留正常异常传播与请求超时保护：推理失败会终止训练并在标准错误中报告，不用伪造结果继续，不另建阶段诊断日志。界面不展示未实际采集的GPU利用率和整卡显存。
 
-旧 Web 服务可通过 `XIANGQI_MODEL` 明确指定本分支兼容的已训练模型，神经搜索使用完整服务端规则状态，并关闭探索噪声。Web 依赖在 `requirements-web.txt`，开发检查依赖在 `requirements-dev.txt`。现有8765训练监控和8767对弈服务不需为本分支重启。
+## 模型与训练设置
 
-### 自然限着将军计数
+本机当前配置：19个残差块、128通道、131输入通道、平铺8100动作头，32盘/8个CPU工作进程，BF16、channels-last、跨对局合批及CUDA Graph。400次搜索、4000步发布、180步上限、搜索前三层噪声、至多5万原始回放局面并开启左右镜像增强；每次SGD抽4096项，可重复抽样。论文参考参数位于 `config/default.yaml`，测试配置与实际训练目录独立。
 
-本分支规则版本为 `xiangqi-development-v3-natural-limit`。按2020版第4.2.4和22.2条，在最后一次吃子之后分别累计红黑将军着数；提出方最多计入10次将军，超出的部分从该方有效着数扣除。完整回合也必须足够：有效回合 = min(未吃子半回合数整除2, 提出方未吃子着数 - max(提出方将军次数 - 10, 0))。吃子后双方将军计数同时清零，吃子兼将军的这一着不计入新一段未吃子阶段。
+Policy交叉熵加标量tanh value的结果MSE；SGD momentum=0.9、初始LR=0.2，在100k/300k/500k更新后各降10倍，预算700k。Data S1正则项为c/2乘参数平方和，weight_decay=1e-4。默认损失按batch均值；Data S1字面求和存在尚未解决的数值/来源差异，不能声称已100%复现，详情见主审查报告。
 
-自对弈自动裁定约定：每个局面由轮到行棋的一方作为自动提出方，有效回合达到60则判和；不能把双方超额将军合并扣除，也不要求双方同时达到各自申请条件。将死、困毙及当前已实现的重复责任判断优先。该约定不模拟申请、犯规扣时和裁判流程。50回合快棋及其他国规缺项仍未实现。
+底层颜色由player_id统一转换。历史重复、自然限着将军计数等状态由同一GameState传递给训练、搜索和人机对弈。自然限着按轮到行棋的一方自动提出处理；将死、困毙及已实现的重复裁定可更早终局，整局上限与连续不吃子上限是两回事。完整国规仍待验收。
 
-训练监控事件、对弈API及旧Web响应的 `natural_limit` 给出原始半回合数、双方将军数、双方有效回合和当前提出方是否达标。历史重放、悔棋和MCTS缓存区分这些计数。131通道网络输入暂不扩展，现有无吃子输入平面仍记录原始计数；双方将军计数尚未各自增加独立输入平面，后续完整规则观测设计仍需补齐。
+## 评估与开发
 
-规则变更会改变终局标签，配置指纹和回放版本已升级；旧开发版规则的learner/replay不会直接恢复为此版本。显式迁移工具只接受已知的v2规则及相同模型/算法规格，创建全新运行目录，保留模型权重、SGD动量、累计步数、学习率日程和随机状态。逐盘重放旧棋谱，核对输入、策略合法性与终局价值；终局发生变化的整盘剔除，数据不完整或损坏则终止迁移。保留策略目标仍是旧规则下生成的MCTS访问数，不会假称已重新搜索，来源写入棋谱及迁移报告。
+评估默认选择当前配置目录中的latest.pt，结果写在同一目录：
 
-~~~bash
-python -m AlphaZero.scripts.migrate_natural_limit --source AlphaZero/runs/xiangqi-v3-20261015 --destination AlphaZero/runs/xiangqi-rules-20261016
-~~~
+```powershell
+wsl --cd . --exec /home/lin/.venvs/xiangqi-alphazero/bin/python -m AlphaZero.scripts.evaluate_model --baseline random --games 8 --simulations 64
+```
 
-上述迁移是main上同一旧策略头的历史记录：81300步存档、145盘及18517局面保持相同终局。自然限着迁移工具要求模型/动作规格相同，不负责将main的全连接头变成当前卷积头；本分支会拒绝此类跨架构来源。本分支管理脚本默认指向新的 `xiangqi-policy-20261016`，不会控制main正在运行的任务。
+少量对随机走法的结果不证明强棋力。测试使用 `requirements-dev.txt`，运行环境依赖为 `requirements.txt`；重建WSL环境用 `scripts/setup_wsl.sh`。诊断、旧后端和对应依赖已移除，历史测量资料只作证据，不作为启动入口。
 
 ### 50平面卷积策略头
 

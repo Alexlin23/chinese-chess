@@ -32,6 +32,12 @@ _ROTATED_ACTIONS = (
     + np.arange(BOARD_SIZE - 1, -1, -1)[None, :]
 ).reshape(POLICY_SIZE)
 _ROTATED_ACTIONS.flags.writeable = False
+_MIRRORED_PLANES = np.array([_PLANE_FOR_DELTA[(dr, -dc)] for dr, dc in ACTION_DELTAS])
+_MIRRORED_ACTIONS = (
+    _MIRRORED_PLANES[:, None] * BOARD_SIZE
+    + np.arange(BOARD_SIZE).reshape(ROWS, COLS)[:, ::-1].reshape(1, BOARD_SIZE)
+).reshape(POLICY_SIZE)
+_MIRRORED_ACTIONS.flags.writeable = False
 
 
 def _integer(value):
@@ -106,6 +112,13 @@ class ActionEncoder:
         if policy.ndim < 1 or policy.shape[-1] != POLICY_SIZE:
             raise ValueError(f"policy must have a final dimension of {POLICY_SIZE}")
         return np.take(policy, _ROTATED_ACTIONS, axis=-1)
+
+    @staticmethod
+    def mirror_action(action: int) -> int:
+        """Reflect the origin column AND displacement, including off-board padding."""
+        if not _integer(action) or not 0 <= action < POLICY_SIZE:
+            return -1
+        return int(_MIRRORED_ACTIONS[action])
 
     @staticmethod
     def legal_actions(legal_moves: list) -> np.ndarray:
