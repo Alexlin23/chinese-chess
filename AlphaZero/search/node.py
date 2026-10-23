@@ -14,6 +14,11 @@ class MCTSNode:
     total_value: float = 0.0               # 累计价值 W(s, a)
     children: dict[int, 'MCTSNode'] = field(default_factory=dict)
     rule_state: object = field(default=None, repr=False, compare=False)
+    network_prior: float = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self):
+        # Retain the unperturbed prior when a subtree is reused in a later search.
+        self.network_prior = self.prior
 
     @property
     def q(self) -> float:

@@ -1,4 +1,4 @@
-# User continuation: 400 searches per move, publish every 8000 SGD updates.
+# User continuation: 8 games, 400 searches per move, publish after every SGD update.
 num_blocks: 19
 num_filters: 128
 input_channels: 131
@@ -7,6 +7,7 @@ c_puct: 1.25
 pb_c_base: 19652.0
 dirichlet_alpha: 0.3
 dirichlet_epsilon: 0.25
+search_noise_depth: 3
 num_sampling_moves: 30
 reuse_tree: false
 mcts_batch_size: 1
@@ -14,6 +15,7 @@ virtual_loss: 0.0
 min_replay_games: 1
 max_game_ply: 180
 batch_size: 4096
+new_positions_per_update: 4096
 loss_reduction: mean
 learning_rate: 0.2
 lr_momentum: 0.9
@@ -23,18 +25,18 @@ lr_milestones:
 - 500000
 lr_decay_rate: 0.1
 weight_decay: 0.0001
-checkpoint_interval: 8000
+checkpoint_interval: 1
 recovery_interval: 100
 max_optimizer_steps: 700000
 replay_window_games: 1000000
 replay_window_positions: 50000
 mirror_augmentation: true
 replay_cache_mb: 256
-num_workers: 32
+num_workers: 8
 inference_batch_size: 128
 inference_wait_ms: 2.0
 checkpoint_dir: AlphaZero/runs/xiangqi-rules-ply300-20261020
-max_iterations: 700
+max_iterations: 700000
 seed: 20261015
 precision: bf16
 channels_last: true

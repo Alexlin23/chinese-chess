@@ -96,11 +96,12 @@ def _convert(directory, staging, payload, config, report):
         row = source.execute("SELECT seq FROM sqlite_sequence WHERE name='games'").fetchone()
         generation = int(row[0]) if row else 0
         recovery = payload.get("extra", {})
+        model_step = payload["step"] + payload.get("optimizer_step_offset", 0)
         if (metadata.get("version") != VERSION or metadata.get("fingerprint") != old.fingerprint
                 or metadata.get("run_id") != payload.get("run_id")
                 or recovery.get("replay_run_id") != metadata.get("run_id")
                 or recovery.get("replay_generation", -1) > generation
-                or int(metadata.get("max_actor_step", 0)) > payload["step"]):
+                or int(metadata.get("max_actor_step", 0)) > model_step):
             raise ValueError("source learner/replay identity or generation mismatch")
         for game, episode, worker, sequence, reason, start, end, raw_trace in source.execute(
                 "SELECT id,episode,worker,sequence,reason,actor_start,actor_end,trace FROM games ORDER BY id"):
@@ -109,7 +110,7 @@ def _convert(directory, staging, payload, config, report):
                 "SELECT planes,globals,actions,probabilities,value FROM positions WHERE game=? ORDER BY id", (game,))]
             if not samples or len(trace.get("moves", [])) != len(samples):
                 raise ValueError("missing or incomplete recorded moves")
-            if max(start, end) > payload["step"]:
+            if max(start, end) > model_step:
                 raise ValueError("game uses actor newer than checkpoint")
             if (len(samples) > config.max_game_ply or
                     (config.max_game_ply > old.max_game_ply and reason == "max_ply")):
@@ -148,9 +149,12 @@ def _convert(directory, staging, payload, config, report):
                        extra=dict(payload.get("extra", {}), **replay.recovery_marker()))
         atomic_torch_save(payload, staging / "learner.pt")
         actor = {key: payload[key] for key in ("spec", "fingerprint", "config", "run_id", "step", "model_state_dict")}
+        actor["step"] = model_step
         actor["config"] = dict(actor["config"])
         actor["config"].pop("replay_window_positions", None)
         actor["config"].pop("mirror_augmentation", None)
+        actor["config"].pop("search_noise_depth", None)
+        actor["config"].pop("new_positions_per_update", None)
         atomic_torch_save(dict(actor, kind="actor"), staging / "latest.pt")
         replay.flush()
     finally:
@@ -176,6 +180,7 @@ def prepare_resume(directory, config, resume):
         raise ValueError("changing max_game_ply requires this run's learner.pt")
     current = json.loads(json.dumps(config.to_dict()))
     previous = json.loads(json.dumps(old.to_dict()))
+    previous.setdefault("search_noise_depth", 1)
     for key in RESUME_FIXED_FIELDS:
         if previous.get(key) != current.get(key):
             raise ValueError("resume changes training semantics: " + key)

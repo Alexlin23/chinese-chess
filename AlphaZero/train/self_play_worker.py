@@ -122,7 +122,7 @@ def self_play_worker_fn(worker_id, config, request_queue, response_queue,
             search = MCTS(evaluator, config.num_simulations, config.c_puct,
                           config.dirichlet_alpha, config.dirichlet_epsilon,
                           config.mcts_batch_size, config.virtual_loss, config.pb_c_base, rng,
-                          reuse_tree=config.reuse_tree)
+                          reuse_tree=config.reuse_tree, search_noise_depth=config.search_noise_depth)
             positions, moves, versions = [], [], []
             started = time.time()
             actor_start = evaluator.model_step

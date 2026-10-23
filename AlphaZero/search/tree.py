@@ -8,9 +8,11 @@ class MCTS:
     def __init__(self, evaluator, num_simulations=800, c_puct=1.25,
                  dirichlet_alpha=0.3, dirichlet_epsilon=0.25,
                  batch_size=1, virtual_loss=0.0, pb_c_base=19652.0, rng=None, reuse_tree=False,
-                 cache_states=True):
+                 cache_states=True, search_noise_depth=1):
         if num_simulations < 1 or batch_size < 1 or virtual_loss < 0:
             raise ValueError("invalid search budget/reservation")
+        if type(search_noise_depth) is not int or search_noise_depth < 0:
+            raise ValueError("search_noise_depth must be a nonnegative integer")
         self.evaluator, self.num_simulations = evaluator, num_simulations
         self.c_puct, self.pb_c_base = c_puct, pb_c_base
         self.dirichlet_alpha, self.dirichlet_epsilon = dirichlet_alpha, dirichlet_epsilon
@@ -18,6 +20,9 @@ class MCTS:
         self.rng = rng if rng is not None else np.random
         self.reuse_tree = reuse_tree
         self.cache_states = cache_states
+        self.search_noise_depth = search_noise_depth
+        self._noise_enabled = False
+        self._prepared_nodes = set()
         self.last_root = None
         self._reuse_root = self._reuse_state = None
         self.diagnostics = {}
@@ -27,10 +32,26 @@ class MCTS:
             node.visit_count -= self.virtual_loss
             node.total_value -= self.virtual_loss
 
+    def _prepare_priors(self, node, depth):
+        """Mix noise once per node/search; depth zero is the current root."""
+        if not node.children or id(node) in self._prepared_nodes:
+            return
+        self._prepared_nodes.add(id(node))
+        # A retained subtree may contain noise from a previous search. Always
+        # start with its network priors, including when noise is now disabled.
+        for child in node.children.values():
+            child.prior = child.network_prior
+        if self._noise_enabled and depth < self.search_noise_depth:
+            noise = self.rng.dirichlet(np.full(len(node.children), self.dirichlet_alpha))
+            for child, sample in zip(node.children.values(), noise):
+                child.prior = ((1 - self.dirichlet_epsilon) * child.network_prior
+                               + self.dirichlet_epsilon * float(sample))
+
     def _select_leaf(self, root, root_state, pending_nodes=None):
         node, state, path = root, root_state, []
         try:
             while node.is_expanded() and not state.is_terminal():
+                self._prepare_priors(node, len(path))
                 action = node.select_child(self.c_puct, self.pb_c_base)
                 path.append((node, action))
                 node = node.children[action]
@@ -88,6 +109,8 @@ class MCTS:
             raise ValueError("temperature cannot be negative")
         output = np.zeros(POLICY_SIZE, dtype=np.float32)
         self.last_root = None
+        self._noise_enabled = add_exploration_noise
+        self._prepared_nodes = set()
         if root_state.is_terminal():
             return output
         reusable = (self.reuse_tree and self._reuse_root is not None and self._reuse_state is not None
@@ -107,11 +130,7 @@ class MCTS:
         initial_visits = root.visit_count
         if not root.is_expanded():
             self._expand(root, root_state)
-        if add_exploration_noise:
-            noise = self.rng.dirichlet(np.full(len(root.children), self.dirichlet_alpha))
-            for child, epsilon in zip(root.children.values(), noise):
-                child.prior = ((1 - self.dirichlet_epsilon) * child.prior
-                               + self.dirichlet_epsilon * float(epsilon))
+        self._prepare_priors(root, 0)
         completed, evaluated, collisions = 0, 0, 0
         while completed < self.num_simulations:
             outstanding = []
@@ -141,6 +160,7 @@ class MCTS:
                     if not terminal:
                         policy, value = neural[id(node)]
                         self._attach(node, state, policy)
+                        self._prepare_priors(node, len(path) - 1)
                     self._backup(path, value, root)
                     outstanding.pop(0)
                     completed += 1

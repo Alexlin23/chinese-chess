@@ -14,6 +14,7 @@ import time
 import numpy as np
 import torch
 from AlphaZero.train.trainer import Trainer
+from AlphaZero.train.update_schedule import UpdateSchedule
 from AlphaZero.train.replay import ReplayBuffer
 from AlphaZero.train.resume import prepare_resume
 from AlphaZero.train.inference_server import InferenceServer
@@ -23,7 +24,7 @@ from AlphaZero.train.performance import Recorder, Hub
 from AlphaZero.scripts.paths import DEFAULT_CONFIG, run_paths
 
 @contextmanager
-def run_lock(directory):
+def run_lock(directory, write_pid=True):
     stream = (directory / ".run.lock").open("a+")
     try:
         if __import__("os").name == "posix":
@@ -39,7 +40,8 @@ def run_lock(directory):
         stream.close()
         raise RuntimeError("another learner owns this run directory") from exc
     try:
-        (directory / "process.pid").write_text(str(os.getpid()) + "\n", encoding="utf-8")
+        if write_pid:
+            (directory / "process.pid").write_text(str(os.getpid()) + "\n", encoding="utf-8")
         yield
     finally:
         stream.close()
@@ -108,25 +110,29 @@ def _pipeline(config, directory, max_iterations, resume, enable_monitor, perform
         replay.bind_spec(config.fingerprint)
         if resume and (recovery.get("replay_run_id") != replay.run_id
                        or recovery.get("replay_generation", -1) > replay.generation
-                       or replay.max_actor_step > trainer.global_optimizer_step):
+                       or replay.max_actor_step > trainer.model_step):
             raise ValueError("checkpoint/replay run or committed generation mismatch")
         if not resume and replay.game_count:
             raise ValueError("existing replay requires explicit resume; use a new directory for fresh training")
         retention = replay.enforce_limits()
         if retention["removed_positions"]:
             print("Replay retention: " + json.dumps(retention), flush=True)
+        update_schedule = UpdateSchedule(config.new_positions_per_update, replay.total_positions,
+                                         (recovery or {}).get("update_schedule"))
     except BaseException:
         replay.close()
         raise
+    def recovery_marker():
+        return dict(replay.recovery_marker(), update_schedule=update_schedule.state_dict())
     config_file = directory / "config.json.tmp"
     config_file.write_text(json.dumps(config.to_dict(), indent=2), encoding="utf-8")
     config_file.replace(directory / "config.json")
     actor = directory / "latest.pt"
     trainer.run_id = replay.run_id
     storage_call("data.publish_wall", trainer.export_actor, actor)
-    # Initial recovery point exists even if interrupted before the first update.
-    if not resume:
-        storage_call("data.checkpoint_wall", trainer.save_checkpoint, learner, replay.recovery_marker())
+    # Save the data counter baseline before actors run, including first enablement on resume.
+    if not resume or config.new_positions_per_update:
+        storage_call("data.checkpoint_wall", trainer.save_checkpoint, learner, recovery_marker())
     context = mp.get_context("spawn")
     stop = context.Event()
     collector_stop = threading.Event()
@@ -143,7 +149,8 @@ def _pipeline(config, directory, max_iterations, resume, enable_monitor, perform
     metrics = (directory / "metrics.jsonl").open("a", encoding="utf-8")
     session_id = uuid.uuid4().hex
     metrics.write(json.dumps(dict(event="session_start", session_id=session_id,
-        step=trainer.global_optimizer_step, run_id=replay.run_id, resumed=bool(resume),
+        step=trainer.global_optimizer_step, model_step=trainer.model_step,
+        run_id=replay.run_id, resumed=bool(resume),
         config=config.to_dict(), config_changes=trainer.resume_config_changes)) + "\n")
     metrics.flush()
     def drain_failures(wait=False):
@@ -195,7 +202,7 @@ def _pipeline(config, directory, max_iterations, resume, enable_monitor, perform
             print(f"Training dashboard: http://{host}:{port}", flush=True)
             live.update(workers=config.num_workers, device=config.device, precision=config.precision,
                         actor_processes=min(config.actor_processes, config.num_workers),
-                        actor_step=trainer.global_optimizer_step, step=trainer.global_optimizer_step,
+                        actor_step=trainer.model_step, step=trainer.global_optimizer_step,
                         positions=len(replay), completed_games=replay.generation, config=config.to_dict())
             live.update(performance=dict(enabled=performance is not None))
         ready = server.start()
@@ -275,8 +282,22 @@ def _pipeline(config, directory, max_iterations, resume, enable_monitor, perform
         while trainer.global_optimizer_step < limit:
             if errors:
                 raise errors[0]
+            if not update_schedule.ready(replay.total_positions):
+                if live:
+                    live.update(phase="collecting")
+                while not update_schedule.ready(replay.total_positions):
+                    if errors:
+                        raise errors[0]
+                    if stop.wait(0.1):
+                        collector.join(1.0)  # Let the existing collector preserve the worker's error.
+                        if errors:
+                            raise errors[0]
+                        raise RuntimeError("self-play stopped while waiting for new replay positions")
+                if live:
+                    live.update(phase="training")
             started = time.perf_counter()
             stats = trainer.step(replay)
+            update_schedule.record_update(replay.total_positions)
             if errors:
                 raise errors[0]
             stats["seconds"] = time.perf_counter() - started
@@ -285,7 +306,7 @@ def _pipeline(config, directory, max_iterations, resume, enable_monitor, perform
             stats["session_id"] = session_id
             stats["num_simulations"] = config.num_simulations
             stats["generated_positions"] = replay.total_positions
-            stats["training_to_data_ratio"] = (trainer.global_optimizer_step * config.batch_size
+            stats["training_to_data_ratio"] = (trainer.model_step * config.batch_size
                                                 / max(replay.total_positions, 1))
             metrics.write(json.dumps(stats, allow_nan=False) + "\n")
             metrics.flush()
@@ -293,14 +314,14 @@ def _pipeline(config, directory, max_iterations, resume, enable_monitor, perform
                 live.update(**stats, positions=len(replay), completed_games=replay.generation)
             step = trainer.global_optimizer_step
             if step % config.recovery_interval == 0 and step % config.checkpoint_interval != 0:
-                storage_call("data.checkpoint_wall", trainer.save_checkpoint, learner, replay.recovery_marker())
+                storage_call("data.checkpoint_wall", trainer.save_checkpoint, learner, recovery_marker())
             if step % config.checkpoint_interval == 0 or step == limit:
                 trainer.current_iteration = step // config.checkpoint_interval
-                storage_call("data.checkpoint_wall", trainer.save_checkpoint, learner, replay.recovery_marker())
+                storage_call("data.checkpoint_wall", trainer.save_checkpoint, learner, recovery_marker())
                 storage_call("data.publish_wall", trainer.export_actor, actor)
                 server.refresh()
                 if live:
-                    live.update(actor_step=step)
+                    live.update(actor_step=trainer.model_step)
                 print(f"step={step} loss={stats['loss']:.5f} lr={stats['lr']:.5g} "
                       f"games={replay.generation} positions={len(replay)} "
                       f"update={stats['seconds']:.3f}s", flush=True)
@@ -350,7 +371,11 @@ def main():
     parser.add_argument("--num-simulations", type=int)
     parser.add_argument("--checkpoint-interval", type=int)
     parser.add_argument("--replay-window-positions", type=int)
+    parser.add_argument("--new-positions-per-update", type=int,
+                        help="new original replay positions required per SGD update; 0 keeps continuous SGD")
     parser.add_argument("--max-game-ply", type=int)
+    parser.add_argument("--search-noise-depth", type=int,
+                        help="self-play noisy decision levels, including the root; 1 is the paper baseline")
     parser.add_argument("--workers", type=int, help="number of simultaneous independent games")
     parser.add_argument("--actor-processes", type=int, help="CPU processes sharing the independent games")
     parser.add_argument("--device", choices=("cpu", "cuda"))
@@ -363,7 +388,8 @@ def main():
                         help="bounded request wait in seconds; runtime only, not a model/search parameter")
     args = parser.parse_args()
     config, directory = run_paths(args.config, args.output_dir)
-    for key in ("num_simulations", "checkpoint_interval", "replay_window_positions", "max_game_ply"):
+    for key in ("num_simulations", "checkpoint_interval", "replay_window_positions", "max_game_ply",
+                "search_noise_depth", "new_positions_per_update"):
         value = getattr(args, key)
         if value is not None:
             setattr(config, key, value)

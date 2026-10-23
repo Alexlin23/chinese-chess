@@ -92,6 +92,8 @@ class PlaySession:
                         thinking=self.thinking, error=self.error, last_move=self.last_move,
                         legal_moves=legal, token=self.token, model_step=self.player.step,
                         simulations=self.player.simulations,
+                        exploration_noise=getattr(self.player, "exploration_noise", False),
+                        search_noise_depth=getattr(self.player, "search_noise_depth", 0),
                         natural_limit=self.state.natural_limit_status(),
                         result=None if result is None else dict(winner=result.winner, reason=result.reason))
 
@@ -151,6 +153,10 @@ def main():
     parser.add_argument("--checkpoint", help="explicit snapshot; otherwise use the configured run's latest.pt")
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
     parser.add_argument("--simulations", type=int, help="default: num_simulations from the selected config")
+    parser.add_argument("--exploration-noise", action=argparse.BooleanOptionalAction, default=False,
+                        help="mix Dirichlet exploration noise into human-play MCTS")
+    parser.add_argument("--search-noise-depth", type=int,
+                        help="noisy search levels; default: selected config search_noise_depth")
     parser.add_argument("--port", type=int, default=8767)
     parser.add_argument("--cuda-memory-fraction", type=float, default=.05)
     parser.add_argument("--wait-for-trained", action="store_true")
@@ -159,6 +165,9 @@ def main():
     config, directory = run_paths(args.config, args.run_dir)
     checkpoint = Path(args.checkpoint).expanduser() if args.checkpoint else directory / "latest.pt"
     simulations = args.simulations if args.simulations is not None else config.num_simulations
+    player_options = dict(exploration_noise=args.exploration_noise,
+                          search_noise_depth=(config.search_noise_depth if args.search_noise_depth is None
+                                              else args.search_noise_depth))
     torch.set_num_threads(1)
     if args.device == "cuda":
         if not 0 < args.cuda_memory_fraction <= 1:
@@ -166,7 +175,7 @@ def main():
         torch.cuda.set_per_process_memory_fraction(args.cuda_memory_fraction)
     while True:
         try:
-            player = ModelPlayer(checkpoint, args.device, simulations)
+            player = ModelPlayer(checkpoint, args.device, simulations, **player_options)
             break
         except (FileNotFoundError, ValueError) as exc:
             if not args.wait_for_trained or (isinstance(exc, ValueError) and "随机初始化" not in str(exc)):
@@ -179,7 +188,7 @@ def main():
         next_signature = current.path.stat().st_mtime_ns
         if signature == next_signature:
             return current
-        candidate = ModelPlayer(current.path, args.device, simulations)
+        candidate = ModelPlayer(current.path, args.device, simulations, **player_options)
         differences = {key for key in candidate.config.spec.keys() | current.config.spec.keys()
                        if candidate.config.spec.get(key) != current.config.spec.get(key)}
         if differences - {"max_game_ply"} or candidate.step < current.step:

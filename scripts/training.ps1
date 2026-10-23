@@ -7,6 +7,8 @@ param(
     [int]$PublishEvery,
     [int]$ReplayPositions,
     [int]$MaxGamePly,
+    [int]$NoiseDepth,
+    [int]$NewPositionsPerUpdate,
     [int]$Publications
 )
 $ErrorActionPreference = 'Stop'
@@ -39,7 +41,7 @@ if ($Action -eq 'Resume' -and -not (Test-Path -LiteralPath "$runDirectory/learne
 New-Item -ItemType Directory -Path $runDirectory -Force | Out-Null
 $trainArguments = @('--cd', $projectDir, '--exec', 'bash', 'scripts/train.sh', '--config', $Config, '--output-dir', $runRelative)
 if ($Action -eq 'Resume') { $trainArguments += @('--resume', "$runRelative/learner.pt") }
-$overrides = @{Simulations='--num-simulations'; PublishEvery='--checkpoint-interval'; ReplayPositions='--replay-window-positions'; MaxGamePly='--max-game-ply'; Publications='--stop-after-publications'}
+$overrides = @{Simulations='--num-simulations'; PublishEvery='--checkpoint-interval'; ReplayPositions='--replay-window-positions'; MaxGamePly='--max-game-ply'; NoiseDepth='--search-noise-depth'; NewPositionsPerUpdate='--new-positions-per-update'; Publications='--stop-after-publications'}
 foreach ($name in $overrides.Keys) {
     if ($PSBoundParameters.ContainsKey($name)) { $trainArguments += @($overrides[$name], [string]$PSBoundParameters[$name]) }
 }

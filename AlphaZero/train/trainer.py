@@ -44,6 +44,8 @@ class Trainer:
         self.optimizer = torch.optim.SGD(self.model.parameters(), lr=config.learning_rate,
                                          momentum=config.lr_momentum, weight_decay=config.weight_decay)
         self.global_optimizer_step = 0
+        self.optimizer_step_offset = 0  # Preserve monotonic model versions if the SGD schedule is rebased.
+        self.optimizer_step_changes = []
         self.current_iteration = 0
         self.resume_config_changes = {}
         self.performance = None  # Runtime observer; never serialized in checkpoints/config.
@@ -127,10 +129,15 @@ class Trainer:
         self.current_iteration += 1
         return stats
 
+    @property
+    def model_step(self):
+        return self.global_optimizer_step + self.optimizer_step_offset
+
     def actor_payload(self):
         return dict(kind="actor", spec=self.config.spec, fingerprint=self.config.fingerprint,
                     run_id=getattr(self, "run_id", None),
                     config=self.config.to_dict(), step=self.global_optimizer_step,
+                    optimizer_step_offset=self.optimizer_step_offset,
                     model_state_dict={k:v.detach().cpu().clone() for k,v in self.model.state_dict().items()})
 
     def export_actor(self, path):
@@ -146,14 +153,21 @@ class Trainer:
         finally:
             self.model.train(was_training)
         payload = self.actor_payload()
-        # Retention and augmentation belong to the learner. Omit these keys so
-        # already-running play servers can load newly published actor snapshots.
+        payload["step"] = self.model_step
+        payload.pop("optimizer_step_offset")
+        # Omit learner/self-play settings so already-running human-play servers
+        # can load newly published actor snapshots without new config fields.
         payload["config"].pop("replay_window_positions", None)
         payload["config"].pop("mirror_augmentation", None)
+        payload["config"].pop("search_noise_depth", None)
+        payload["config"].pop("new_positions_per_update", None)
         atomic_torch_save(payload, path)
 
     def save_checkpoint(self, path=None, extra=None):
         payload = self.actor_payload()
+        extra = dict(extra or {})
+        if self.optimizer_step_changes:
+            extra["optimizer_step_changes"] = self.optimizer_step_changes
         payload.update(kind="learner", optimizer_type="SGD",
                        optimizer_state_dict=self.optimizer.state_dict(),
                        current_iteration=self.current_iteration,
@@ -161,7 +175,7 @@ class Trainer:
                        torch_rng_state=torch.get_rng_state(),
                        cuda_rng_states=[s.cpu() for s in torch.cuda.get_rng_state_all()]
                        if str(self.device).startswith("cuda") else None,
-                       extra=extra or {})
+                       extra=extra)
         path = path or self.config.checkpoint_path / "learner.pt"
         atomic_torch_save(payload, path)
         return str(path)
@@ -178,6 +192,10 @@ class Trainer:
         self.model.load_state_dict(state["model_state_dict"], strict=True)
         self.optimizer.load_state_dict(state["optimizer_state_dict"])
         self.global_optimizer_step = state["step"]
+        self.optimizer_step_offset = state.get("optimizer_step_offset", 0)
+        if type(self.optimizer_step_offset) is not int or self.optimizer_step_offset < 0:
+            raise ValueError("invalid optimizer step offset")
+        self.optimizer_step_changes = state.get("extra", {}).get("optimizer_step_changes", [])
         self.current_iteration = state["current_iteration"]
         if state["config"].get("checkpoint_interval") != self.config.checkpoint_interval:
             self.current_iteration = self.global_optimizer_step // self.config.checkpoint_interval
@@ -186,11 +204,13 @@ class Trainer:
         torch.set_rng_state(state["torch_rng_state"].cpu())
         if str(self.device).startswith("cuda") and state.get("cuda_rng_states") is not None:
             torch.cuda.set_rng_state_all([s.cpu() for s in state["cuda_rng_states"]])
-        # Search effort, publication cadence and optional replay retention may change on resume.
+        # Search effort/noise depth, publication cadence and replay retention may change on resume.
         # Keep the caller's config and log changes without resetting learner state.
         previous = json.loads(json.dumps(state["config"]))
         previous.setdefault("replay_window_positions", 0)
         previous.setdefault("mirror_augmentation", False)
+        previous.setdefault("search_noise_depth", 1)
+        previous.setdefault("new_positions_per_update", 0)
         current = json.loads(json.dumps(self.config.to_dict()))
         self.resume_config_changes = {
             key: dict(old=previous.get(key), new=value)
