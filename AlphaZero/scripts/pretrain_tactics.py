@@ -25,7 +25,7 @@ from AlphaZero.tactics.evaluate import evaluate,evaluation_ids
 
 def export_actor(model,config,run_id,step,path):
     values=config.to_dict()
-    for key in ('mirror_augmentation','replay_window_positions','new_positions_per_update','search_noise_depth'):
+    for key in ('mirror_augmentation','replay_window_positions','new_positions_per_update','search_noise_depth','training_microbatch_size'):
         values.pop(key,None)
     payload=dict(kind='actor',spec=config.spec,fingerprint=config.fingerprint,config=values,
                  run_id=run_id,step=step,model_state_dict={k:v.detach().cpu().clone() for k,v in model.state_dict().items()},

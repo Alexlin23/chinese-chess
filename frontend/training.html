@@ -4,7 +4,7 @@
 <title>AlphaZero · 训练实况</title><link rel="stylesheet" href="/training.css"></head>
 <body>
 <header><div><div class="eyebrow">ALPHAZERO / XIANGQI</div><h1>训练实况 <span class="live-dot"></span></h1>
-<p>每一盘，都是正在发生的自我对弈。</p></div><div class="connection" id="connection" role="status">正在连接…</div></header>
+<p>每一盘，都是正在发生的自我对弈。</p></div><div class="training-actions"><div class="connection" id="connection" role="status">正在连接…</div><button id="stopTraining" type="button" disabled>停止训练</button><span id="stopStatus" role="status" aria-live="polite"></span></div></header>
 <main>
 <section class="metrics" aria-label="训练指标">
 <div><span>同时对弈</span><strong id="active">0</strong><small id="workers">等待训练进程</small></div>
@@ -32,6 +32,6 @@
 <div id="empty" class="empty"><div class="empty-symbol">棋</div><h3>等待对局开始</h3><p>训练进程启动后，所有并发棋盘会自动出现在这里。</p></div>
 <section id="boards" class="boards" aria-label="所有正在进行的训练对局"></section>
 <section id="errors" class="errors" hidden aria-live="polite"></section>
-<footer><span id="rule">规则状态 · 读取中</span><span>只读观测 · 页面断开不影响训练</span></footer>
+<footer><span id="rule">规则状态 · 读取中</span><span>停止后可从存档继续 · 关闭页面不会停止训练</span></footer>
 </main><script src="/training.js" defer></script>
 </body></html>

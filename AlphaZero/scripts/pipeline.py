@@ -137,6 +137,12 @@ def _pipeline(config, directory, max_iterations, resume, enable_monitor, perform
     stop = context.Event()
     collector_stop = threading.Event()
     shutting_down = threading.Event()
+    user_stop = threading.Event()
+    def request_stop():
+        # Mark shutdown before waking workers so their exits are not reported as failures.
+        shutting_down.set()
+        user_stop.set()
+        stop.set()
     results = context.Queue(maxsize=config.num_workers * 2)
     events = context.Queue(maxsize=max(32, config.num_workers * 4))
     performance_queue = context.Queue(maxsize=max(64, config.num_workers * 2)) if performance else None
@@ -195,12 +201,14 @@ def _pipeline(config, directory, max_iterations, resume, enable_monitor, perform
             temporary.replace(directory / "performance.json")
         except OSError:
             performance.increment("monitor.output_errors")
+    stop_save_ready = False
     try:
         if enable_monitor:
             live = LiveTraining(config.telemetry_host, config.telemetry_port, config.telemetry_interval)
             host, port = live.address
             print(f"Training dashboard: http://{host}:{port}", flush=True)
             live.update(workers=config.num_workers, device=config.device, precision=config.precision,
+                        session_id=session_id, run_id=replay.run_id,
                         actor_processes=min(config.actor_processes, config.num_workers),
                         actor_step=trainer.model_step, step=trainer.global_optimizer_step,
                         positions=len(replay), completed_games=replay.generation, config=config.to_dict())
@@ -220,6 +228,8 @@ def _pipeline(config, directory, max_iterations, resume, enable_monitor, perform
                 kwargs=dict(failure_queue=server.failures, request_timeout=inference_timeout), daemon=True)
             process.start()
             processes.append(process)
+        if live:
+            live.enable_stop(request_stop)
         def collect():
             try:
                 while True:
@@ -273,29 +283,37 @@ def _pipeline(config, directory, max_iterations, resume, enable_monitor, perform
         collector.start()
         if live:
             live.update(phase="collecting")
-        while replay.game_count < config.min_replay_games:
+        while replay.game_count < config.min_replay_games and not user_stop.is_set():
             if errors:
                 raise errors[0]
             time.sleep(0.1)
         if live:
             live.update(phase="training")
-        while trainer.global_optimizer_step < limit:
+        while trainer.global_optimizer_step < limit and not user_stop.is_set():
             if errors:
                 raise errors[0]
             if not update_schedule.ready(replay.total_positions):
                 if live:
                     live.update(phase="collecting")
                 while not update_schedule.ready(replay.total_positions):
+                    if user_stop.is_set():
+                        break
                     if errors:
                         raise errors[0]
                     if stop.wait(0.1):
+                        if user_stop.is_set():
+                            break
                         collector.join(1.0)  # Let the existing collector preserve the worker's error.
                         if errors:
                             raise errors[0]
                         raise RuntimeError("self-play stopped while waiting for new replay positions")
+                if user_stop.is_set():
+                    break
                 if live:
                     live.update(phase="training")
             started = time.perf_counter()
+            if user_stop.is_set():
+                break
             stats = trainer.step(replay)
             update_schedule.record_update(replay.total_positions)
             if errors:
@@ -325,6 +343,7 @@ def _pipeline(config, directory, max_iterations, resume, enable_monitor, perform
                 print(f"step={step} loss={stats['loss']:.5f} lr={stats['lr']:.5g} "
                       f"games={replay.generation} positions={len(replay)} "
                       f"update={stats['seconds']:.3f}s", flush=True)
+        stop_save_ready = user_stop.is_set()
     except BaseException as exc:
         drain_failures()
         if live and not isinstance(exc, KeyboardInterrupt):
@@ -333,11 +352,19 @@ def _pipeline(config, directory, max_iterations, resume, enable_monitor, perform
     finally:
         shutting_down.set()
         stop.set()
+        # All workers share one grace period, rather than waiting N times in series.
+        deadline = time.monotonic() + 2
         for process in processes:
-            process.join(4)
+            process.join(max(0, deadline - time.monotonic()))
+        for process in processes:
             if process.is_alive():
                 process.terminate()
-                process.join(4)
+        deadline = time.monotonic() + 2
+        for process in processes:
+            process.join(max(0, deadline - time.monotonic()))
+            if process.is_alive():
+                process.kill()
+                process.join(2)
         collector_stop.set()
         if collector:
             collector.join(10)
@@ -353,11 +380,38 @@ def _pipeline(config, directory, max_iterations, resume, enable_monitor, perform
         for queue in (results, events):
             queue.cancel_join_thread()
             queue.close()
-        if live:
-            live.close()
-        metrics.close()
-        replay.flush()
-        replay.close()
+        try:
+            if stop_save_ready:
+                if errors:
+                    raise errors[0]
+                # Finish an in-flight SGD normally; save only after the collector is quiescent.
+                if collector and collector.is_alive():
+                    raise RuntimeError("collector did not stop; refusing an inconsistent final checkpoint")
+                replay.flush()
+                trainer.save_checkpoint(learner, recovery_marker())
+                trainer.export_actor(actor)
+                stopped = dict(event="user_stop", session_id=session_id, run_id=replay.run_id,
+                    step=trainer.global_optimizer_step, model_step=trainer.model_step,
+                    completed_games=replay.generation, positions=len(replay),
+                    generated_positions=replay.total_positions, saved=True, stopped_at=time.time())
+                metrics.write(json.dumps(stopped) + "\n")
+                metrics.flush()
+                temporary = directory / "training-stop.json.tmp"
+                temporary.write_text(json.dumps(stopped, indent=2) + "\n", encoding="utf-8")
+                temporary.replace(directory / "training-stop.json")
+                if live:
+                    live.update(**{k:v for k,v in stopped.items() if k != "event"}, actor_step=trainer.model_step)
+                print(f"Training stopped and saved: step={trainer.global_optimizer_step} model={trainer.model_step}", flush=True)
+        except BaseException as exc:
+            if live:
+                live.update(phase="failed", errors=[dict(error=repr(exc))])
+            raise
+        finally:
+            if live:
+                live.close()
+            metrics.close()
+            replay.flush()
+            replay.close()
     return dict(step=trainer.global_optimizer_step, games=replay.generation, positions=len(replay))
 
 def main():
@@ -370,6 +424,9 @@ def main():
                         help="stop after this many NEW global publication boundaries; startup export is excluded")
     parser.add_argument("--num-simulations", type=int)
     parser.add_argument("--checkpoint-interval", type=int)
+    parser.add_argument("--batch-size", type=int, help="effective replay samples per SGD update")
+    parser.add_argument("--training-microbatch-size", type=int,
+                        help="samples per forward/backward; 0 processes the full effective batch")
     parser.add_argument("--replay-window-positions", type=int)
     parser.add_argument("--new-positions-per-update", type=int,
                         help="new original replay positions required per SGD update; 0 keeps continuous SGD")
@@ -380,6 +437,7 @@ def main():
     parser.add_argument("--actor-processes", type=int, help="CPU processes sharing the independent games")
     parser.add_argument("--device", choices=("cpu", "cuda"))
     parser.add_argument("--no-monitor", action="store_true")
+    parser.add_argument("--telemetry-port", type=int, help="runtime dashboard port; 0 selects a free port")
     parser.add_argument("--performance", action=argparse.BooleanOptionalAction, default=False,
                         help="optional five-module performance accounting; checkpoint format unchanged")
     parser.add_argument("--performance-interval", type=float, default=5.0)
@@ -388,7 +446,7 @@ def main():
                         help="bounded request wait in seconds; runtime only, not a model/search parameter")
     args = parser.parse_args()
     config, directory = run_paths(args.config, args.output_dir)
-    for key in ("num_simulations", "checkpoint_interval", "replay_window_positions", "max_game_ply",
+    for key in ("num_simulations", "checkpoint_interval", "batch_size", "training_microbatch_size", "replay_window_positions", "max_game_ply",
                 "search_noise_depth", "new_positions_per_update"):
         value = getattr(args, key)
         if value is not None:
@@ -399,6 +457,8 @@ def main():
         config.actor_processes = args.actor_processes
     if args.device:
         config.device = args.device
+    if args.telemetry_port is not None:
+        config.telemetry_port = args.telemetry_port
     config.__post_init__()
     result = pipeline(config, args.max_iterations, resume=args.resume,
                       output_dir=directory, enable_monitor=not args.no_monitor,

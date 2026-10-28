@@ -155,6 +155,7 @@ def _convert(directory, staging, payload, config, report):
         actor["config"].pop("mirror_augmentation", None)
         actor["config"].pop("search_noise_depth", None)
         actor["config"].pop("new_positions_per_update", None)
+        actor["config"].pop("training_microbatch_size", None)
         atomic_torch_save(dict(actor, kind="actor"), staging / "latest.pt")
         replay.flush()
     finally:

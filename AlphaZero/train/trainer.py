@@ -83,18 +83,32 @@ class Trainer:
                 gpu_sample.mark()
             compute_started = time.perf_counter()
         self.optimizer.zero_grad(set_to_none=True)
-        with autocast_context(self.device, self.config.precision):
-            logits, v = self.forward_model(x)
-        # Full action CE is intentional; legal masking is conditional inference.
-        policy_per_position = -(pi * F.log_softmax(logits.float(), dim=1)).sum(1)
-        policy_loss = getattr(policy_per_position, self.config.loss_reduction)()
-        value_loss = F.mse_loss(v.float(), z, reduction=self.config.loss_reduction)
+        batch_size = len(states)
+        microbatch = self.config.training_microbatch_size or batch_size
+        policy_loss = torch.zeros((), device=self.device)
+        value_loss = torch.zeros((), device=self.device)
+        for start in range(0, batch_size, microbatch):
+            end = min(start + microbatch, batch_size)
+            with autocast_context(self.device, self.config.precision):
+                logits, v = self.forward_model(x[start:end])
+            # Full action CE is intentional; legal masking is conditional inference.
+            policy_per_position = -(pi[start:end] * F.log_softmax(logits.float(), dim=1)).sum(1)
+            chunk_policy = getattr(policy_per_position, self.config.loss_reduction)()
+            chunk_value = F.mse_loss(v.float(), z[start:end], reduction=self.config.loss_reduction)
+            # Weight short final chunks correctly; sum reduction already adds across samples.
+            weight = (end - start) / batch_size if self.config.loss_reduction == "mean" else 1
+            chunk_loss = (chunk_policy + chunk_value) * weight
+            if not bool(torch.isfinite(chunk_loss)):
+                raise FloatingPointError("non-finite learner loss")
+            chunk_loss.backward()
+            policy_loss += chunk_policy.detach() * weight
+            value_loss += chunk_value.detach() * weight
+            del logits, v, policy_per_position, chunk_policy, chunk_value, chunk_loss
         loss = policy_loss + value_loss
         regularization = (self.config.weight_decay / 2) * sum(
             p.detach().square().sum() for p in self.model.parameters())
         if not bool(torch.isfinite(loss + regularization)):
             raise FloatingPointError("non-finite learner loss")
-        loss.backward()
         # Fail closed; clipping would introduce a separate algorithmic choice.
         finite = torch.stack([torch.isfinite(p.grad).all() for p in self.model.parameters()
                               if p.grad is not None]).all()
@@ -113,7 +127,9 @@ class Trainer:
                     data_loss=float(loss.detach()), data_loss_per_position=float(loss.detach()) / (self.config.batch_size if self.config.loss_reduction == "sum" else 1),
                     regularization=float(regularization),
                     policy_loss=float(policy_loss.detach()), value_loss=float(value_loss.detach()),
-                    lr=lr, replay_positions=len(replay))
+                    lr=lr, replay_positions=len(replay), batch_size=batch_size,
+                    training_microbatch_size=min(microbatch, batch_size),
+                    accumulation_steps=(batch_size + microbatch - 1) // microbatch)
         if performance is not None:
             performance.observe("sgd.compute_wall", time.perf_counter() - compute_started)
             performance.observe("sgd.update_wall", time.perf_counter() - step_started)
@@ -161,6 +177,7 @@ class Trainer:
         payload["config"].pop("mirror_augmentation", None)
         payload["config"].pop("search_noise_depth", None)
         payload["config"].pop("new_positions_per_update", None)
+        payload["config"].pop("training_microbatch_size", None)
         atomic_torch_save(payload, path)
 
     def save_checkpoint(self, path=None, extra=None):
@@ -204,13 +221,14 @@ class Trainer:
         torch.set_rng_state(state["torch_rng_state"].cpu())
         if str(self.device).startswith("cuda") and state.get("cuda_rng_states") is not None:
             torch.cuda.set_rng_state_all([s.cpu() for s in state["cuda_rng_states"]])
-        # Search effort/noise depth, publication cadence and replay retention may change on resume.
+        # Batch size, search effort/noise depth, publication cadence and replay retention may change on resume.
         # Keep the caller's config and log changes without resetting learner state.
         previous = json.loads(json.dumps(state["config"]))
         previous.setdefault("replay_window_positions", 0)
         previous.setdefault("mirror_augmentation", False)
         previous.setdefault("search_noise_depth", 1)
         previous.setdefault("new_positions_per_update", 0)
+        previous.setdefault("training_microbatch_size", 0)
         current = json.loads(json.dumps(self.config.to_dict()))
         self.resume_config_changes = {
             key: dict(old=previous.get(key), new=value)

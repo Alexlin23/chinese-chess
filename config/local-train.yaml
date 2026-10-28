@@ -1,22 +1,23 @@
 # Policy cold-start experiment. Offline pretraining has its own AdamW/epoch settings.
-# Future self-play (only on explicit Resume): 8 games, 400 searches, publish every SGD update.
+# Self-play: 8 games, 800 searches, publish every SGD update.
 num_blocks: 19
 num_filters: 128
 input_channels: 131
-num_simulations: 400
+num_simulations: 800
 c_puct: 1.25
 pb_c_base: 19652.0
 dirichlet_alpha: 0.3
 dirichlet_epsilon: 0.25
-search_noise_depth: 3
+search_noise_depth: 1
 num_sampling_moves: 30
 reuse_tree: false
 mcts_batch_size: 1
 virtual_loss: 0.0
 min_replay_games: 1
 max_game_ply: 180
-batch_size: 256
-new_positions_per_update: 256
+batch_size: 4096
+training_microbatch_size: 2048
+new_positions_per_update: 4096
 loss_reduction: mean
 learning_rate: 0.002
 lr_momentum: 0.9
@@ -30,7 +31,7 @@ checkpoint_interval: 1
 recovery_interval: 100
 max_optimizer_steps: 700000
 replay_window_games: 1000000
-replay_window_positions: 50000
+replay_window_positions: 200000
 mirror_augmentation: true
 replay_cache_mb: 256
 num_workers: 8

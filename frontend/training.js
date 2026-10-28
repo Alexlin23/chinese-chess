@@ -4,7 +4,25 @@ const cards = new Map();
 const number = value => Number(value || 0).toLocaleString("zh-CN");
 const names = {1:"帥",2:"仕",3:"相",4:"馬",5:"車",6:"炮",7:"兵",
   "-1":"將","-2":"士","-3":"象","-4":"馬","-5":"車","-6":"砲","-7":"卒"};
-const phases = {starting:"正在启动",collecting:"收集首批完整对局",training:"持续训练与自对弈",failed:"训练异常",stopped:"已停止"};
+const phases = {starting:"正在启动",collecting:"等待新增完整对局",training:"持续训练与自对弈",stopping:"正在保存并停止",failed:"训练异常",stopped:"已停止"};
+let controlToken, stopping=false, starting=false, resumable=false, connected=false, terminal=false, pendingAction=null;
+function updateStopButton(){
+  $("stopTraining").disabled=!connected||!controlToken||stopping||starting||Boolean(pendingAction)||terminal;
+  $("stopTraining").textContent=terminal?"训练已结束":stopping?"正在停止…":starting?"正在恢复…":resumable?"继续训练":"停止训练";
+}
+$("stopTraining").addEventListener("click",async()=>{
+  if($("stopTraining").disabled)return;
+  const action=resumable?"resume":"stop";
+  pendingAction=action;stopping=action==="stop";starting=action==="resume";updateStopButton();
+  $("stopStatus").textContent=starting?"正在从最后存档恢复训练…":"正在停止对弈，保存后退出训练进程…";
+  try{
+    const response=await fetch("/api/"+action,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({token:controlToken})});
+    if(!response.ok)throw new Error("请求未被接受");
+  }catch(error){
+    pendingAction=null;stopping=false;starting=false;updateStopButton();
+    $("stopStatus").textContent=action==="stop"?"未确认停止，请检查连接后重试。":"未能恢复训练，请查看错误信息或重试。";
+  }
+});
 let performanceKey;
 const perfLabels={"mcts.hand_wall":"MCTS每手","mcts.local_cpu_estimate_wall":"MCTS本地墙钟估算","mcts.neural_sync_wall":"MCTS同步神经调用","communication.rtt_wall":"请求往返（含推理）","inference.batch_wait_wall":"推理等待合批","inference.idle_wait_wall":"服务空闲等请求","inference.prepare_host_wall":"推理准备（主机）","inference.execution_wall":"推理执行与回传（墙钟）","inference.service_wall":"每个实际批次服务","inference.compute_cuda":"推理CUDA执行抽样","inference.compute_cuda_cold":"推理CUDA冷图抽样","inference.prepare_cuda":"推理准备CUDA区间抽样","inference.graph_warmup_wall":"CUDA图首次准备与执行","inference.batch_size":"推理实际输入Batch","inference.executed_batch_size":"推理执行Batch（含填充）","sgd.sample_wall":"Replay采样","sgd.transfer_host_wall":"SGD传输准备（主机）","sgd.compute_wall":"SGD计算及参数更新","sgd.update_wall":"SGD完整更新","sgd.transfer_cuda":"SGD传输CUDA区间抽样","sgd.compute_cuda":"SGD计算CUDA区间抽样","data.replay_write_wall":"Replay写入","data.checkpoint_wall":"Checkpoint保存","data.publish_wall":"模型导出发布"};
 function renderPerformance(perf){
@@ -77,6 +95,14 @@ function makeCard(worker){
   return {card,title,turn,canvas,detail,model,key:""};
 }
 function render(state){
+  if((pendingAction==="stop"&&(state.stop_requested||state.resume_available||state.terminal))||
+     (pendingAction==="resume"&&(state.resume_requested||state.stop_available||state.errors?.length)))pendingAction=null;
+  controlToken=state.stop_available||state.resume_available?state.control_token:null;
+  resumable=Boolean(state.resume_available);
+  stopping=Boolean(state.stop_requested)||pendingAction==="stop";
+  starting=Boolean(state.resume_requested)||pendingAction==="resume";terminal=Boolean(state.terminal);
+  updateStopButton();
+  $("stopStatus").textContent=stopping?(terminal?(state.saved?"已保存模型 "+number(state.actor_step)+"，训练服务正在退出。":"停止过程异常，请查看错误信息。") : "正在保存并退出；未完成的对局不入库。") : starting?"正在从最后存档恢复训练…":resumable?(state.saved?"已保存模型 "+number(state.actor_step)+"，训练进程已退出。":"训练已退出，可从最后存档继续。") : "";
   renderPerformance(state.performance);
   const games=state.boards||{}, keys=Object.keys(games).sort((a,b)=>Number(a)-Number(b));
   $("active").textContent=number(keys.length);$("workers").textContent=number(state.workers)+" 盘并发 · "+number(state.actor_processes||state.workers)+" 个工作进程";
@@ -105,8 +131,8 @@ function render(state){
   const errors=state.errors||[];$("errors").hidden=!errors.length;$("errors").textContent=errors.map(e=>e.error).join("\n");
 }
 const source=new EventSource("/events");
-source.onopen=()=>{$("connection").textContent="● 实时连接";$("connection").className="connection";};
-source.onerror=()=>{$("connection").textContent="连接中断 · 自动重连";$("connection").className="connection offline";};
+source.onopen=()=>{connected=true;updateStopButton();$("connection").textContent="● 实时连接";$("connection").className="connection";};
+source.onerror=()=>{connected=false;updateStopButton();$("connection").textContent=stopping?"停止中 · 等待服务退出":"连接中断 · 自动重连";$("connection").className="connection offline";};
 source.onmessage=event=>{try{const state=JSON.parse(event.data);render(state);
   if(state.terminal){source.close();$("connection").textContent=state.phase==="failed"?"训练异常":"训练已结束";$("connection").className="connection";}
 }catch(error){console.error("Invalid training event",error);}};

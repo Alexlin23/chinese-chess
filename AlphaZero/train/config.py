@@ -16,7 +16,7 @@ RULE_VERSION = "xiangqi-development-v3-natural-limit"  # CNXA 2020 check cap; ch
 TARGET_VERSION = "scalar-mse-visits-v1"
 
 RESUME_FIXED_FIELDS = (
-    "batch_size", "loss_reduction", "learning_rate", "lr_momentum", "weight_decay",
+    "loss_reduction", "learning_rate", "lr_momentum", "weight_decay",
     "lr_milestones", "lr_decay_rate", "c_puct", "pb_c_base", "dirichlet_alpha",
     "dirichlet_epsilon", "mcts_batch_size", "virtual_loss", "replay_window_games",
     "seed", "num_sampling_moves", "reuse_tree")
@@ -39,6 +39,7 @@ class AlphaZeroConfig:
     min_replay_games: int = 1
     max_game_ply: int = 512
     batch_size: int = 4096
+    training_microbatch_size: int = 0  # 0: full batch; otherwise accumulate chunks before one SGD step.
     new_positions_per_update: int = 0  # 0: continuous SGD; otherwise newly committed originals per update.
     loss_reduction: str = "mean"  # Paper per-position objective; Data S1 literal sum is an audit mode.
     learning_rate: float = 0.2
@@ -95,6 +96,8 @@ class AlphaZeroConfig:
             raise ValueError("search_noise_depth must be a nonnegative integer")
         if type(self.new_positions_per_update) is not int or self.new_positions_per_update < 0:
             raise ValueError("new_positions_per_update must be a nonnegative integer")
+        if type(self.training_microbatch_size) is not int or self.training_microbatch_size < 0:
+            raise ValueError("training_microbatch_size must be a nonnegative integer")
         if type(self.reuse_tree) is not bool:
             raise ValueError("reuse_tree must be boolean")
         if type(self.mirror_augmentation) is not bool:
