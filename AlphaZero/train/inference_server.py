@@ -9,7 +9,7 @@ import numpy as np
 import torch
 from .trainer import create_model
 from ..model.neural_eval import autocast_context
-from ..model.cuda_graph import CudaGraphForward
+from ..model.cuda_graph import CudaGraphPolicy
 from ..engine.constants import POLICY_SIZE
 from .performance import Recorder
 
@@ -41,6 +41,26 @@ class BatchResponse:
     worker_id: int
     model_step: int = 0
     error: object = None
+
+
+def _gather_batch(first, requests, max_batch, num_workers, wait_ms):
+    """Gather independent requests without waiting after all actors have sent."""
+    batch, count = [first], len(first.states)
+    deadline = time.monotonic() + wait_ms / 1000
+    # Each actor waits for its response before sending another request.
+    while count < max_batch and len(batch) < num_workers:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            item = requests.get(timeout=remaining)
+        except Empty:
+            break
+        if count + len(item.states) > max_batch:
+            return batch, item
+        batch.append(item)
+        count += len(item.states)
+    return batch, None
 
 class InferenceServer:
     def __init__(self, model_path, config, context=None, run_id=None,
@@ -114,7 +134,7 @@ def _serve(path, config, requests, responses, ready, refresh, stop, run_id,
                 model.load_state_dict(checkpoint["model_state_dict"])
                 model.eval()
                 if config.device == "cuda" and config.inference_cuda_graph:
-                    models[version] = CudaGraphForward(model, config.precision,
+                    models[version] = CudaGraphPolicy(model, config.precision,
                         config.channels_last, config.inference_batch_size)
                 else:
                     models[version] = torch.compile(model) if config.compile_model else model
@@ -143,22 +163,8 @@ def _serve(path, config, requests, responses, ready, refresh, stop, run_id,
             if performance is not None:
                 performance.observe("inference.idle_wait_wall", time.perf_counter() - idle_started)
                 batch_started = time.perf_counter()
-            batch = [request]
-            count = len(request.states)
-            deadline = time.monotonic() + config.inference_wait_ms / 1000
-            while count < config.inference_batch_size:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    break
-                try:
-                    item = requests.get(timeout=remaining)
-                except Empty:
-                    break
-                if count + len(item.states) > config.inference_batch_size:
-                    pending = item
-                    break
-                batch.append(item)
-                count += len(item.states)
+            batch, pending = _gather_batch(request, requests, config.inference_batch_size,
+                                           len(responses), config.inference_wait_ms)
             if performance is not None:
                 performance.observe("inference.batch_wait_wall", time.perf_counter() - batch_started)
             try:
@@ -204,14 +210,22 @@ def _serve(path, config, requests, responses, ready, refresh, stop, run_id,
                             gpu_sample.mark()
                         execution_started = time.perf_counter()
                     with torch.inference_mode(), autocast_context(config.device, config.precision):
-                        logits, values = models[version](array)
-                        raw_finite = torch.isfinite(logits).all()
-                        policy_tensor = logits.float().masked_fill(~masks, -torch.inf).softmax(1)
-                        if performance is not None and gpu_sample is not None:
-                            gpu_sample.mark()  # Existing .cpu() below completes events.
-                        policies = policy_tensor.cpu().numpy()
-                        del policy_tensor
-                        values = values.float().cpu().numpy()
+                        if isinstance(models[version], CudaGraphPolicy):
+                            packed = models[version](array, masks)
+                            if performance is not None and gpu_sample is not None:
+                                gpu_sample.mark()
+                            host = packed.cpu().numpy()
+                            policies, values = host[:, :-2], host[:, -2]
+                            raw_finite = bool((host[:, -1] == 1).all())
+                        else:
+                            logits, values = models[version](array)
+                            raw_finite = torch.isfinite(logits).all()
+                            policy_tensor = logits.float().masked_fill(~masks, -torch.inf).softmax(1)
+                            if performance is not None and gpu_sample is not None:
+                                gpu_sample.mark()  # Existing .cpu() below completes events.
+                            policies = policy_tensor.cpu().numpy()
+                            del policy_tensor
+                            values = values.float().cpu().numpy()
                     if (not bool(raw_finite) or not np.isfinite(policies).all() or not np.isfinite(values).all()
                             or np.any(np.abs(values) > 1.00001)
                             or not np.allclose(policies.sum(1), 1, atol=1e-5)):
