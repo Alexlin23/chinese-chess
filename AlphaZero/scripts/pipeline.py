@@ -210,7 +210,8 @@ def _pipeline(config, directory, max_iterations, resume, enable_monitor, perform
             live.update(workers=config.num_workers, device=config.device, precision=config.precision,
                         session_id=session_id, run_id=replay.run_id,
                         actor_processes=min(config.actor_processes, config.num_workers),
-                        actor_step=trainer.model_step, step=trainer.global_optimizer_step,
+                        actor_step=trainer.model_step, actor_optimizer_step=trainer.global_optimizer_step,
+                        step=trainer.global_optimizer_step,
                         positions=len(replay), completed_games=replay.generation, config=config.to_dict())
             live.update(performance=dict(enabled=performance is not None))
         ready = server.start()
@@ -339,7 +340,7 @@ def _pipeline(config, directory, max_iterations, resume, enable_monitor, perform
                 storage_call("data.publish_wall", trainer.export_actor, actor)
                 server.refresh()
                 if live:
-                    live.update(actor_step=trainer.model_step)
+                    live.update(actor_step=trainer.model_step, actor_optimizer_step=step)
                 print(f"step={step} loss={stats['loss']:.5f} lr={stats['lr']:.5g} "
                       f"games={replay.generation} positions={len(replay)} "
                       f"update={stats['seconds']:.3f}s", flush=True)
@@ -400,7 +401,8 @@ def _pipeline(config, directory, max_iterations, resume, enable_monitor, perform
                 temporary.write_text(json.dumps(stopped, indent=2) + "\n", encoding="utf-8")
                 temporary.replace(directory / "training-stop.json")
                 if live:
-                    live.update(**{k:v for k,v in stopped.items() if k != "event"}, actor_step=trainer.model_step)
+                    live.update(**{k:v for k,v in stopped.items() if k != "event"},
+                                actor_step=trainer.model_step, actor_optimizer_step=trainer.global_optimizer_step)
                 print(f"Training stopped and saved: step={trainer.global_optimizer_step} model={trainer.model_step}", flush=True)
         except BaseException as exc:
             if live:

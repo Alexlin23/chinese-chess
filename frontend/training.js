@@ -2,6 +2,12 @@
 const $ = id => document.getElementById(id);
 const cards = new Map();
 const number = value => Number(value || 0).toLocaleString("zh-CN");
+// Display self-play SGD publication numbers; keep storage/cache versions unchanged.
+function modelVersion(state, version=state.actor_step){
+  if(state.actor_optimizer_step==null||version==null)return version;
+  const offset=state.actor_step-state.actor_optimizer_step;
+  return version>=offset?version-offset:version;
+}
 const names = {1:"帥",2:"仕",3:"相",4:"馬",5:"車",6:"炮",7:"兵",
   "-1":"將","-2":"士","-3":"象","-4":"馬","-5":"車","-6":"砲","-7":"卒"};
 const phases = {starting:"正在启动",collecting:"等待新增完整对局",training:"持续训练与自对弈",stopping:"正在保存并停止",failed:"训练异常",stopped:"已停止"};
@@ -102,12 +108,12 @@ function render(state){
   stopping=Boolean(state.stop_requested)||pendingAction==="stop";
   starting=Boolean(state.resume_requested)||pendingAction==="resume";terminal=Boolean(state.terminal);
   updateStopButton();
-  $("stopStatus").textContent=stopping?(terminal?(state.saved?"已保存模型 "+number(state.actor_step)+"，训练服务正在退出。":"停止过程异常，请查看错误信息。") : "正在保存并退出；未完成的对局不入库。") : starting?"正在从最后存档恢复训练…":resumable?(state.saved?"已保存模型 "+number(state.actor_step)+"，训练进程已退出。":"训练已退出，可从最后存档继续。") : "";
+  $("stopStatus").textContent=stopping?(terminal?(state.saved?"已保存模型 "+number(modelVersion(state))+"，训练服务正在退出。":"停止过程异常，请查看错误信息。") : "正在保存并退出；未完成的对局不入库。") : starting?"正在从最后存档恢复训练…":resumable?(state.saved?"已保存模型 "+number(modelVersion(state))+"，训练进程已退出。":"训练已退出，可从最后存档继续。") : "";
   renderPerformance(state.performance);
   const games=state.boards||{}, keys=Object.keys(games).sort((a,b)=>Number(a)-Number(b));
   $("active").textContent=number(keys.length);$("workers").textContent=number(state.workers)+" 盘并发 · "+number(state.actor_processes||state.workers)+" 个工作进程";
   $("games").textContent=number(state.completed_games);$("positions").textContent=number(state.positions)+" 个回放局面";
-  $("step").textContent=number(state.step);$("actor").textContent="已发布模型 · "+number(state.actor_step);
+  $("step").textContent=number(state.step);$("actor").textContent="已发布模型 · "+number(modelVersion(state));
   $("loss").textContent=state.loss==null?"—":state.loss.toFixed(4);
   if(state.value_loss!=null)$("lossDetail").textContent="策略 "+state.policy_loss.toFixed(3)+" / 价值 "+state.value_loss.toFixed(3);
   $("phase").textContent=phases[state.phase]||state.phase;
@@ -124,7 +130,7 @@ function render(state){
     view.title.textContent="对局 "+(Number(worker)+1)+" · 第 "+(game.sequence+1)+" 局";
     view.turn.textContent=game.turn===1?"红方行棋":"黑方行棋";view.turn.className="turn"+(game.turn===1?" red":"");
     view.detail.textContent="第 "+game.ply+" 手 · "+Math.max(0,Math.floor(Date.now()/1000-game.started))+" 秒";
-    view.model.textContent=game.ply===0?"首次搜索中":"模型 "+number(game.actor_step)+" · 上一手 "+number(game.diagnostics?.simulations||0)+" 次搜索";
+    view.model.textContent=game.ply===0?"首次搜索中":"模型 "+number(modelVersion(state,game.actor_step))+" · 上一手 "+number(game.diagnostics?.simulations||0)+" 次搜索";
     const key=game.episode+":"+game.ply;
     if(view.key!==key){draw(view.canvas,game);view.canvas.setAttribute("aria-label",view.title.textContent+"，第 "+game.ply+" 手，"+view.turn.textContent);view.key=key;}
   }

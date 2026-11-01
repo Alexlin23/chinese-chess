@@ -57,7 +57,8 @@ class TrainingDashboard:
         if stop_file.exists():
             saved = json.loads(stop_file.read_text())
             self.live.update(**{k: saved[k] for k in ("step", "model_step", "positions", "completed_games")},
-                             actor_step=saved["model_step"], saved=saved.get("saved", False))
+                             actor_step=saved["model_step"], actor_optimizer_step=saved["step"],
+                             saved=saved.get("saved", False))
         self.live.update(resume_available=self.can_resume())
 
     def can_resume(self):
@@ -144,6 +145,7 @@ class TrainingDashboard:
                     resume_available=self.can_resume(), saved=bool(saved.get("saved")))
                 if saved:
                     self.live.update(step=saved["step"], actor_step=saved["model_step"],
+                        actor_optimizer_step=saved["step"],
                         completed_games=saved["completed_games"], positions=saved["positions"])
                 if failed:
                     self.live.update(errors=[dict(error=f"训练进程已退出（{code}），可从最后存档继续；详情：{self.stderr.name}")])

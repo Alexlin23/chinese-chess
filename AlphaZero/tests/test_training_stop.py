@@ -164,11 +164,12 @@ def test_dashboard_stop_resume_cycles_preserve_checkpoint_and_gate(tmp_path):
             state = until(lambda s: s.get("stop_available") and bool(s.get("boards")))
             root = psutil.Process(dashboard.process.pid)
             owned = [root] + root.children(recursive=True)
-            assert state["step"] == 1 and state["actor_step"] == 1
+            assert state["step"] == 1 and state["actor_step"] == 1 and state["actor_optimizer_step"] == 1
             assert post(url, {"token": token})[0] == 202
             assert post(url, {"token": token})[0] == 202
             paused = until(lambda s: s.get("resume_available"))
             assert paused["phase"] == "stopped" and paused["saved"]
+            assert paused["actor_optimizer_step"] == 1
             assert not paused.get("terminal") and not paused["boards"]
             assert not [p for p in owned if p.is_running() and p.status() != psutil.STATUS_ZOMBIE]
             assert_saved(tmp_path, 1)

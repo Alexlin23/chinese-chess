@@ -79,3 +79,15 @@ test('managed stop keeps the stream, enables resume only after exit and permits 
   assert.equal(button.textContent, '停止训练');
   assert.equal(button.disabled, false);
 });
+
+test('publication display uses published SGD, waits for publication and preserves historical offsets', () => {
+  const {elements, run}=setup(async()=>({ok:true}));
+  run('render({boards:{},hardware:{},phase:"stopped",resume_available:true,saved:true,step:300,actor_step:17052,actor_optimizer_step:300})');
+  assert.equal(elements.get('actor').textContent,'已发布模型 · 300');
+  assert.match(elements.get('stopStatus').textContent,/已保存模型 300/);
+  run('render({boards:{},hardware:{},phase:"training",step:301,actor_step:17052,actor_optimizer_step:300})');
+  assert.equal(elements.get('actor').textContent,'已发布模型 · 300');
+  run('render({boards:{},hardware:{},phase:"training",step:301,actor_step:17053,actor_optimizer_step:301})');
+  assert.equal(elements.get('actor').textContent,'已发布模型 · 301');
+  assert.equal(run('modelVersion({actor_step:17053,actor_optimizer_step:301},17052)'),300);
+});
