@@ -171,6 +171,8 @@ class Trainer:
         payload = self.actor_payload()
         payload["step"] = self.model_step
         payload.pop("optimizer_step_offset")
+        if self.config.checkpoint_interval == 1:
+            payload["publication_count"] = self.global_optimizer_step
         # Omit learner/self-play settings so already-running human-play servers
         # can load newly published actor snapshots without new config fields.
         payload["config"].pop("replay_window_positions", None)
@@ -178,6 +180,8 @@ class Trainer:
         payload["config"].pop("search_noise_depth", None)
         payload["config"].pop("new_positions_per_update", None)
         payload["config"].pop("training_microbatch_size", None)
+        payload["config"].pop("inference_shared_memory", None)
+        payload["config"].pop("inference_buffer_reuse", None)
         atomic_torch_save(payload, path)
 
     def save_checkpoint(self, path=None, extra=None):

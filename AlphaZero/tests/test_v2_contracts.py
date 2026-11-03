@@ -103,12 +103,13 @@ def test_live_snapshot_any_number_boards_and_stale_events():
         live.close()
 
 
-def test_inference_snapshot_pinning_and_nonfinite_failure(tmp_path):
+@pytest.mark.parametrize("shared", [False, True])
+def test_inference_snapshot_pinning_and_nonfinite_failure(tmp_path, shared):
     import time
     from AlphaZero.train.inference_server import InferenceServer
     from AlphaZero.train.self_play_worker import BatchRemoteEvaluator
     config=AlphaZeroConfig(num_blocks=1,num_filters=4,num_workers=2,
-        batch_size=2,device="cpu",precision="fp32")
+        batch_size=2,device="cpu",precision="fp32",inference_shared_memory=shared)
     trainer=Trainer(config)
     path=tmp_path/"actor.pt"
     trainer.export_actor(path)

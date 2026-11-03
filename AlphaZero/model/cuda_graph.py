@@ -1,5 +1,6 @@
 """Reusable CUDA inference graphs for immutable evaluation snapshots."""
 import torch
+import numpy as np
 
 
 class CudaGraphForward:
@@ -53,6 +54,52 @@ class CudaGraphPolicy:
         self.model, self.precision = model, precision
         self.channels_last, self.max_batch = channels_last, max_batch
         self.cache = {}
+        self.host_cache = {}
+
+    @torch.inference_mode()
+    def prepare_host(self, state_batches, mask_batches):
+        """Stage directly into persistent graph inputs, without intermediate GPU tensors."""
+        count = sum(len(states) for states in state_batches)
+        if not 0 < count <= self.max_batch:
+            raise ValueError("invalid inference batch")
+        size = min(1 << (count - 1).bit_length(), self.max_batch)
+        if size not in self.host_cache:
+            device = next(self.model.parameters()).device
+            shape = (size, *state_batches[0].shape[1:])
+            policy_size = mask_batches[0].shape[1]
+            # Capture uses the same graph implementation as the device-input API.
+            self(torch.zeros(shape, device=device),
+                 torch.ones((size, policy_size), dtype=torch.bool, device=device))
+            states = torch.empty(shape, pin_memory=True,
+                memory_format=torch.channels_last if self.channels_last else torch.contiguous_format)
+            masks = torch.empty((size, policy_size), dtype=torch.bool, pin_memory=True)
+            output = torch.empty((size, policy_size + 2), pin_memory=True)
+            self.host_cache[size] = states, masks, output, states.numpy(), masks.numpy()
+        host_states, host_masks, host_output, states_view, masks_view = self.host_cache[size]
+        offset = 0
+        for states, masks in zip(state_batches, mask_batches):
+            end = offset + len(states)
+            np.copyto(states_view[offset:end], states)
+            np.copyto(masks_view[offset:end], masks)
+            offset = end
+        if count < size:
+            states_view[count:].fill(0)
+            masks_view[count:].fill(True)
+        static, static_masks, graph, output = self.cache[size]
+        static.copy_(host_states, non_blocking=True)
+        static_masks.copy_(host_masks, non_blocking=True)
+        return count, graph, output, host_output
+
+    @torch.inference_mode()
+    def run_host(self, prepared, gpu_sample=None):
+        count, graph, output, host_output = prepared
+        graph.replay()
+        if gpu_sample is not None:
+            gpu_sample.mark()
+        host_output.copy_(output, non_blocking=True)
+        torch.cuda.current_stream(output.device).synchronize()
+        # Queue feeders may serialize after the next replay; give them owned data.
+        return host_output.numpy()[:count].copy()
 
     def _forward(self, states, masks):
         with torch.autocast("cuda", dtype=torch.bfloat16,

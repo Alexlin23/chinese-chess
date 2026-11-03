@@ -28,6 +28,13 @@ def test_policy_graph_matches_eager_across_reused_padded_batches(precision):
         assert (actual[:, -1] == 1).all()
         assert (actual[:, :-2][~masks] == 0).all()
         torch.testing.assert_close(actual[:, :-2].sum(1), torch.ones(count, device="cuda"))
+        host_states, host_masks = states.cpu().numpy(), masks.cpu().numpy()
+        previous = graph.run_host(graph.prepare_host([host_states], [host_masks]))
+        frozen = previous.copy()
+        again = graph.run_host(graph.prepare_host([host_states[:1], host_states[1:]],
+                                                  [host_masks[:1], host_masks[1:]]))
+        torch.testing.assert_close(torch.from_numpy(again), actual.cpu(), rtol=tolerance, atol=tolerance)
+        assert (previous == frozen).all()
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")

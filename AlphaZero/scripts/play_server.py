@@ -91,6 +91,7 @@ class PlaySession:
                         turn=self.state.current_player, human=self.human, ply=self.state.move_count,
                         thinking=self.thinking, error=self.error, last_move=self.last_move,
                         legal_moves=legal, token=self.token, model_step=self.player.step,
+                        publication_count=getattr(self.player, "publication_count", None),
                         simulations=self.player.simulations,
                         exploration_noise=getattr(self.player, "exploration_noise", False),
                         search_noise_depth=getattr(self.player, "search_noise_depth", 0),

@@ -33,3 +33,33 @@ class NeuralEvaluator:
         for i, state in enumerate(states):
             policies[i] = state.absolute_policy(policies[i])
         return policies, values
+
+
+class CudaGraphEvaluator(NeuralEvaluator):
+    """Local play uses the same complete policy graph and staging buffers as self-play.
+
+    Calls are serialized by the owner (PlaySession.model_lock). Returned arrays
+    own their storage, including across later graph replays or model reloads.
+    """
+    def __init__(self, model, device="cuda", precision="bf16", channels_last=True):
+        super().__init__(model, device, precision, channels_last)
+        from .cuda_graph import CudaGraphPolicy
+        self.graph = CudaGraphPolicy(model, precision, channels_last)
+
+    def evaluate_batch(self, states):
+        if not states:
+            raise ValueError("empty inference batch")
+        if self.model.training:
+            raise RuntimeError("inference requires eval mode")
+        arrays = [state.encode()[None] for state in states]
+        masks = [state.canonical_mask()[None] for state in states]
+        if any(not mask.any() for mask in masks):
+            raise ValueError("terminal/empty legal set sent for neural inference")
+        host = self.graph.run_host(self.graph.prepare_host(arrays, masks))
+        policies, values = host[:, :-2], host[:, -2]
+        if (not (host[:, -1] == 1).all() or not np.isfinite(policies).all()
+                or not np.isfinite(values).all()):
+            raise FloatingPointError("non-finite neural output")
+        for i, state in enumerate(states):
+            policies[i] = state.absolute_policy(policies[i])
+        return policies, values

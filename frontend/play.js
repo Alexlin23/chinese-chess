@@ -42,7 +42,7 @@ function render(next){
       const [tr,tc]=screen(move[2],move[3]);ctx.fillStyle="#218653";ctx.beginPath();ctx.arc(28+tc*38,28+tr*38,4,0,Math.PI*2);ctx.fill();
     }
   }
-  $("model").textContent="已训练 "+state.model_step.toLocaleString("zh-CN")+" 步 · 每手 "+state.simulations+" 次搜索";
+  $("model").textContent="已发布次数："+(Number.isInteger(state.publication_count)?state.publication_count.toLocaleString("zh-CN"):"暂不可读")+" · 每手 "+state.simulations+" 次搜索";
   $("ply").textContent="第 "+state.ply+" 手";
   $("error").textContent=state.error||"";
   $("status").textContent=state.result?(state.result.winner===null?"和棋":state.result.winner===state.human?"你赢了":"模型获胜"):state.error?"模型运行异常":state.thinking?"模型正在思考…":state.turn===state.human?"轮到你走棋":"等待模型";

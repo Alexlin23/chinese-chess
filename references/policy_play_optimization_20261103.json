@@ -1,0 +1,326 @@
+{
+  "date_local": "2026-11-03",
+  "branch": "alphazero_Policy",
+  "actor_step": 17132,
+  "copied_actor_sha256": "af83f38df84bda51080aa96760896e9ff834af1ba34ad773d694fa94aacb9a03",
+  "method": "Same isolated actor, same model object/precision, single background worker as in PlaySession. 800 simulations, root noise enabled, fixed RNG and three reproducible black-to-move positions (plies 1/13/33). Warm both paths before timing; old/new/new/old order per position. Timer covers choose(), excludes loading and HTTP. Training continued concurrently; no model writes.",
+  "training_before": {
+    "phase": "collecting",
+    "step": 380,
+    "actor_step": 17132
+  },
+  "training_after": {
+    "phase": "collecting",
+    "step": 380,
+    "actor_step": 17132
+  },
+  "records": [
+    {
+      "kind": "old",
+      "ply": 1,
+      "seconds": 2.9209105480113067,
+      "move": [
+        2,
+        7,
+        2,
+        4
+      ],
+      "diagnostics": {
+        "simulations": 800,
+        "evaluated_leaves": 800,
+        "pending_collisions": 0,
+        "root_visits": 800,
+        "reused_visits": 0
+      }
+    },
+    {
+      "kind": "optimized",
+      "ply": 1,
+      "seconds": 1.9069647199939936,
+      "move": [
+        2,
+        7,
+        2,
+        4
+      ],
+      "diagnostics": {
+        "simulations": 800,
+        "evaluated_leaves": 800,
+        "pending_collisions": 0,
+        "root_visits": 800,
+        "reused_visits": 0
+      }
+    },
+    {
+      "kind": "optimized",
+      "ply": 1,
+      "seconds": 1.8084029509918764,
+      "move": [
+        2,
+        7,
+        2,
+        4
+      ],
+      "diagnostics": {
+        "simulations": 800,
+        "evaluated_leaves": 800,
+        "pending_collisions": 0,
+        "root_visits": 800,
+        "reused_visits": 0
+      }
+    },
+    {
+      "kind": "old",
+      "ply": 1,
+      "seconds": 2.8241785500431433,
+      "move": [
+        2,
+        7,
+        2,
+        4
+      ],
+      "diagnostics": {
+        "simulations": 800,
+        "evaluated_leaves": 800,
+        "pending_collisions": 0,
+        "root_visits": 800,
+        "reused_visits": 0
+      }
+    },
+    {
+      "kind": "old",
+      "ply": 13,
+      "seconds": 3.0182993090129457,
+      "move": [
+        2,
+        7,
+        2,
+        4
+      ],
+      "diagnostics": {
+        "simulations": 800,
+        "evaluated_leaves": 800,
+        "pending_collisions": 0,
+        "root_visits": 800,
+        "reused_visits": 0
+      }
+    },
+    {
+      "kind": "optimized",
+      "ply": 13,
+      "seconds": 1.9721849590423517,
+      "move": [
+        2,
+        7,
+        2,
+        4
+      ],
+      "diagnostics": {
+        "simulations": 800,
+        "evaluated_leaves": 800,
+        "pending_collisions": 0,
+        "root_visits": 800,
+        "reused_visits": 0
+      }
+    },
+    {
+      "kind": "optimized",
+      "ply": 13,
+      "seconds": 1.9457185930223204,
+      "move": [
+        2,
+        7,
+        2,
+        4
+      ],
+      "diagnostics": {
+        "simulations": 800,
+        "evaluated_leaves": 800,
+        "pending_collisions": 0,
+        "root_visits": 800,
+        "reused_visits": 0
+      }
+    },
+    {
+      "kind": "old",
+      "ply": 13,
+      "seconds": 2.9053566929651424,
+      "move": [
+        2,
+        7,
+        2,
+        4
+      ],
+      "diagnostics": {
+        "simulations": 800,
+        "evaluated_leaves": 800,
+        "pending_collisions": 0,
+        "root_visits": 800,
+        "reused_visits": 0
+      }
+    },
+    {
+      "kind": "old",
+      "ply": 33,
+      "seconds": 3.1637879029731266,
+      "move": [
+        2,
+        5,
+        6,
+        5
+      ],
+      "diagnostics": {
+        "simulations": 800,
+        "evaluated_leaves": 800,
+        "pending_collisions": 0,
+        "root_visits": 800,
+        "reused_visits": 0
+      }
+    },
+    {
+      "kind": "optimized",
+      "ply": 33,
+      "seconds": 2.1006812819978222,
+      "move": [
+        2,
+        5,
+        6,
+        5
+      ],
+      "diagnostics": {
+        "simulations": 800,
+        "evaluated_leaves": 800,
+        "pending_collisions": 0,
+        "root_visits": 800,
+        "reused_visits": 0
+      }
+    },
+    {
+      "kind": "optimized",
+      "ply": 33,
+      "seconds": 2.1408496199874207,
+      "move": [
+        2,
+        5,
+        6,
+        5
+      ],
+      "diagnostics": {
+        "simulations": 800,
+        "evaluated_leaves": 800,
+        "pending_collisions": 0,
+        "root_visits": 800,
+        "reused_visits": 0
+      }
+    },
+    {
+      "kind": "old",
+      "ply": 33,
+      "seconds": 3.084248370025307,
+      "move": [
+        2,
+        5,
+        6,
+        5
+      ],
+      "diagnostics": {
+        "simulations": 800,
+        "evaluated_leaves": 800,
+        "pending_collisions": 0,
+        "root_visits": 800,
+        "reused_visits": 0
+      }
+    }
+  ],
+  "median_seconds": {
+    "old": 2.969604928512126,
+    "optimized": 1.958951776032336
+  },
+  "reduction_percent": 34.03325279993262,
+  "per_position": {
+    "1": {
+      "old": 2.872544549027225,
+      "optimized": 1.857683835492935
+    },
+    "13": {
+      "old": 2.961828000989044,
+      "optimized": 1.958951776032336
+    },
+    "33": {
+      "old": 3.124018136499217,
+      "optimized": 2.1207654509926215
+    }
+  },
+  "all_repeated_moves_match": true,
+  "limitations": [
+    "Six move timings per path under concurrent training, not a guarantee for every position.",
+    "Warm model timing excludes first load/graph capture and up to 500ms page polling.",
+    "Matching selected moves in these positions does not establish equal playing strength."
+  ],
+  "validation": {
+    "result": "19 passed in 15.05s",
+    "suites": [
+      {
+        "name": "pytest",
+        "errors": "0",
+        "failures": "0",
+        "skipped": "0",
+        "tests": "19",
+        "time": "14.949",
+        "timestamp": "2026-11-03T10:40:44.862812+08:00",
+        "hostname": "lin"
+      }
+    ]
+  },
+  "restart": {
+    "pid": 2585065,
+    "command": [
+      "/home/lin/.venvs/xiangqi-alphazero/bin/python",
+      "-u",
+      "-m",
+      "AlphaZero.scripts.play_server",
+      "--config",
+      "/mnt/c/Users/18928/.codex/worktrees/alphazero-policy/Alphazero/config/local-train.yaml",
+      "--device",
+      "cuda",
+      "--simulations",
+      "800",
+      "--search-noise-depth",
+      "1",
+      "--port",
+      "8770",
+      "--exploration-noise"
+    ],
+    "cwd": "/mnt/c/Users/18928/.codex/worktrees/alphazero-policy/Alphazero",
+    "log": "/tmp/alphazero-policy-play-8770-20261103T024440Z.log",
+    "old_pid": 1861279,
+    "model_step": 17132,
+    "publication_count": 380,
+    "simulations": 800,
+    "fresh_game_ply": 0,
+    "http_smoke_reply_seconds": 1.9384583219652995,
+    "http_smoke_completed": true,
+    "training_before": {
+      "phase": "collecting",
+      "step": 380,
+      "actor_step": 17132
+    },
+    "training_after": {
+      "phase": "collecting",
+      "step": 380,
+      "actor_step": 17132
+    },
+    "training_process_preserved": true
+  },
+  "source_actor": "/mnt/d/project/Alphazero-data/policy-tactics/run/latest.pt",
+  "code_hashes": {
+    "AlphaZero/model/player.py": "bc3c3336414a0aacef60a04604e06d08d2e4aeea43061117ea6d88b43a508557",
+    "AlphaZero/model/neural_eval.py": "c57f324fed3753c27b02eba38e745f8eaebefe0a4dfde0f66470e5498af900eb",
+    "AlphaZero/model/cuda_graph.py": "b6d9ec3a6290e0d60084b827e932bdee84d432b0d75ff3b5f6f6bebfb299e94b",
+    "AlphaZero/tests/test_play_graph.py": "d258c01a99818eae6308e415a17f491240eca8069d256a81581ed7a344c79af4"
+  },
+  "cleanup": {
+    "temporary_directory": "/mnt/d/project/az-play-speed-20261103-e81gff2x",
+    "complete": true
+  }
+}

@@ -64,6 +64,47 @@ def test_abandoned_ai_reply_cannot_overwrite_new_game():
         session.close()
 
 
+@pytest.mark.parametrize("legacy", [False, True])
+def test_play_publications_exclude_pretraining_offset(tmp_path, legacy):
+    torch.set_num_threads(1)
+    trainer = Trainer(AlphaZeroConfig(num_blocks=1, num_filters=4, checkpoint_interval=1,
+                                     device="cpu", precision="fp32"))
+    trainer.global_optimizer_step = 311
+    trainer.optimizer_step_offset = 16752
+    trainer.run_id = "same-run"
+    trainer.save_checkpoint(tmp_path / "learner.pt")
+    path = tmp_path / "latest.pt"
+    trainer.export_actor(path)
+    if legacy:
+        saved = torch.load(path, weights_only=False)
+        saved.pop("publication_count")
+        torch.save(saved, path)
+    player = ModelPlayer(path, simulations=1)
+    assert player.step == 17063 and player.publication_count == 311
+    session = PlaySession(player)
+    try:
+        assert session.snapshot()["publication_count"] == 311
+    finally:
+        session.close()
+    if legacy:
+        # A newer learner can supply the offset without changing this game's model.
+        trainer.global_optimizer_step = 312
+        trainer.save_checkpoint(tmp_path / "learner.pt")
+        assert ModelPlayer(path, simulations=1).publication_count == 311
+        trainer.run_id = "other-run"
+        trainer.save_checkpoint(tmp_path / "learner.pt")
+        assert ModelPlayer(path, simulations=1).publication_count is None
+
+
+def test_play_does_not_guess_publications_for_multi_update_schedule(tmp_path):
+    trainer = Trainer(AlphaZeroConfig(num_blocks=1, num_filters=4, checkpoint_interval=10,
+                                     device="cpu", precision="fp32"))
+    trainer.global_optimizer_step = 20
+    path = tmp_path / "latest.pt"
+    trainer.export_actor(path)
+    assert ModelPlayer(path, simulations=1).publication_count is None
+
+
 def test_cuda_graph_padding_and_repeated_inputs():
     if not torch.cuda.is_available():
         pytest.skip("CUDA unavailable")

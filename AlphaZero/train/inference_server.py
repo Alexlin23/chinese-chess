@@ -69,8 +69,16 @@ class InferenceServer:
         self.model_path = str(model_path)
         self.run_id = run_id
         self.context = context or mp.get_context("spawn")
-        self.request_queue = self.context.Queue(maxsize=config.num_workers * 2)
-        self.response_queues = {i:self.context.Queue(maxsize=2) for i in range(config.num_workers)}
+        if config.inference_shared_memory:
+            from .inference_transport import SharedInferenceBuffers, SharedRequestQueue, SharedResponseQueue, SignalQueue
+            buffers = SharedInferenceBuffers(self.context, config.num_workers,
+                config.inference_batch_size, config.input_channels, POLICY_SIZE)
+            self.request_queue = SharedRequestQueue(SignalQueue(self.context), buffers)
+            self.response_queues = {i:SharedResponseQueue(SignalQueue(self.context), buffers)
+                                    for i in range(config.num_workers)}
+        else:
+            self.request_queue = self.context.Queue(maxsize=config.num_workers * 2)
+            self.response_queues = {i:self.context.Queue(maxsize=2) for i in range(config.num_workers)}
         self.ready = self.context.Queue(maxsize=1)
         self.refresh_queue = self.context.Queue(maxsize=1)
         self.stop_event = self.context.Event()
@@ -197,13 +205,18 @@ def _serve(path, config, requests, responses, ready, refresh, stop, run_id,
                         gpu_sample = performance.cuda_sample(config.device,
                             ("inference.prepare_cuda", "inference.compute_cuda_cold" if cold_graph
                              else "inference.compute_cuda"))
-                    array = torch.from_numpy(np.concatenate([x.states for x in group]))
-                    masks = torch.from_numpy(np.concatenate([x.masks for x in group])).to(config.device)
-                    if config.device == "cuda":
-                        array = array.pin_memory()
-                    array = array.to(config.device, non_blocking=True)
-                    if config.channels_last and config.device == "cuda":
-                        array = array.contiguous(memory_format=torch.channels_last)
+                    reuse_buffers = config.inference_buffer_reuse and isinstance(models[version], CudaGraphPolicy)
+                    if reuse_buffers:
+                        prepared = models[version].prepare_host([x.states for x in group],
+                                                               [x.masks for x in group])
+                    else:
+                        array = torch.from_numpy(np.concatenate([x.states for x in group]))
+                        masks = torch.from_numpy(np.concatenate([x.masks for x in group])).to(config.device)
+                        if config.device == "cuda":
+                            array = array.pin_memory()
+                        array = array.to(config.device, non_blocking=True)
+                        if config.channels_last and config.device == "cuda":
+                            array = array.contiguous(memory_format=torch.channels_last)
                     if performance is not None:
                         performance.observe("inference.prepare_host_wall", time.perf_counter() - group_started)
                         if gpu_sample is not None:
@@ -211,10 +224,13 @@ def _serve(path, config, requests, responses, ready, refresh, stop, run_id,
                         execution_started = time.perf_counter()
                     with torch.inference_mode(), autocast_context(config.device, config.precision):
                         if isinstance(models[version], CudaGraphPolicy):
-                            packed = models[version](array, masks)
-                            if performance is not None and gpu_sample is not None:
-                                gpu_sample.mark()
-                            host = packed.cpu().numpy()
+                            if reuse_buffers:
+                                host = models[version].run_host(prepared, gpu_sample if performance else None)
+                            else:
+                                packed = models[version](array, masks)
+                                if performance is not None and gpu_sample is not None:
+                                    gpu_sample.mark()
+                                host = packed.cpu().numpy()
                             policies, values = host[:, :-2], host[:, -2]
                             raw_finite = bool((host[:, -1] == 1).all())
                         else:
@@ -233,11 +249,11 @@ def _serve(path, config, requests, responses, ready, refresh, stop, run_id,
                     if performance is not None:
                         performance.observe("inference.execution_wall", time.perf_counter() - execution_started)
                         performance.observe("inference.service_wall", time.perf_counter() - group_started)
-                        performance.observe("inference.batch_size", len(array))
+                        performance.observe("inference.batch_size", real_batch)
                         performance.observe("inference.executed_batch_size", executed_batch)
                         if cold_graph:
                             performance.observe("inference.graph_warmup_wall", time.perf_counter() - execution_started)
-                        performance.increment("inference.positions", len(array))
+                        performance.increment("inference.positions", real_batch)
                         if gpu_sample is not None:
                             gpu_sample.finish()
                     offset = 0

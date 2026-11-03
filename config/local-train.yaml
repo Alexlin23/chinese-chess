@@ -1,5 +1,5 @@
 # Policy cold-start experiment. Offline pretraining has its own AdamW/epoch settings.
-# Self-play: 8 games, 800 searches, publish every SGD update.
+# Self-play: 8 games in 8 processes, 800 searches, publish every SGD update.
 num_blocks: 19
 num_filters: 128
 input_channels: 131
@@ -37,6 +37,8 @@ replay_cache_mb: 256
 num_workers: 8
 inference_batch_size: 128
 inference_wait_ms: 2.0
+inference_shared_memory: true
+inference_buffer_reuse: true
 checkpoint_dir: /mnt/d/project/Alphazero-data/policy-tactics/run
 max_iterations: 700000
 seed: 20261015

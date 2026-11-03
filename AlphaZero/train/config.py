@@ -58,6 +58,8 @@ class AlphaZeroConfig:
     actor_processes: int = 8
     inference_batch_size: int = 128
     inference_wait_ms: float = 2.0
+    inference_shared_memory: bool = False
+    inference_buffer_reuse: bool = False
     checkpoint_dir: str = "AlphaZero/runs/training"
     max_iterations: int = 700
     seed: int = 20261015
@@ -100,6 +102,9 @@ class AlphaZeroConfig:
             raise ValueError("training_microbatch_size must be a nonnegative integer")
         if type(self.reuse_tree) is not bool:
             raise ValueError("reuse_tree must be boolean")
+        for key in ("inference_shared_memory", "inference_buffer_reuse"):
+            if type(getattr(self, key)) is not bool:
+                raise ValueError(f"{key} must be boolean")
         if type(self.mirror_augmentation) is not bool:
             raise ValueError("mirror_augmentation must be boolean")
         if self.mcts_batch_size > self.inference_batch_size:

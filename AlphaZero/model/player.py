@@ -5,7 +5,30 @@ from ..engine import GameState
 from ..search import MCTS
 from ..train.config import AlphaZeroConfig
 from .network import PolicyValueNetwork
-from .neural_eval import NeuralEvaluator
+from .neural_eval import NeuralEvaluator, CudaGraphEvaluator
+
+
+def _publication_count(payload, path, model_step):
+    count = payload.get("publication_count")
+    if type(count) is int and count >= 0:
+        return count
+    # SGD updates equal publications only for the one-update publication schedule.
+    if payload["config"].get("checkpoint_interval") != 1:
+        return None
+    if payload["kind"] == "learner" or "optimizer_step_offset" in payload:
+        return int(payload["step"])
+    # Older actor exports store only a version including the pretraining offset.
+    # Read metadata from their own run; never replace the loaded game's weights.
+    learner = path.with_name("learner.pt")
+    if path.name != "latest.pt" or not learner.is_file() or not payload.get("run_id"):
+        return None
+    saved = torch.load(learner, map_location="meta", weights_only=False, mmap=True)
+    if (saved.get("kind") != "learner" or saved.get("run_id") != payload["run_id"]
+            or saved.get("fingerprint") != payload["fingerprint"]):
+        return None
+    offset = saved.get("optimizer_step_offset", 0)
+    count = model_step - offset
+    return count if 0 <= count <= saved["step"] else None
 
 
 class ModelPlayer:
@@ -25,6 +48,7 @@ class ModelPlayer:
         self.step = int(payload["step"]) + payload.get("optimizer_step_offset", 0)
         if self.step < 1:
             raise ValueError("第 0 步是随机初始化，尚无训练成果可用")
+        self.publication_count = _publication_count(payload, self.path, self.step)
         if simulations < 1:
             raise ValueError("搜索次数必须大于零")
         self.simulations = simulations
@@ -39,12 +63,11 @@ class ModelPlayer:
             self.model.to(memory_format=torch.channels_last)
         self.model.eval()
         precision = self.config.precision if device.startswith("cuda") else "fp32"
-        forward = None
         if device.startswith("cuda") and self.config.inference_cuda_graph:
-            from .cuda_graph import CudaGraphForward
-            forward = CudaGraphForward(self.model, precision, self.config.channels_last)
-        self.evaluator = NeuralEvaluator(self.model, device, precision,
-                                        self.config.channels_last and device.startswith("cuda"), forward_model=forward)
+            self.evaluator = CudaGraphEvaluator(self.model, device, precision, self.config.channels_last)
+        else:
+            self.evaluator = NeuralEvaluator(self.model, device, precision,
+                                            self.config.channels_last and device.startswith("cuda"))
         self.evaluator.evaluate(GameState.new_game())
 
     def choose(self, state):
